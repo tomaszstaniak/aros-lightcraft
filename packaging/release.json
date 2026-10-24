@@ -1,10 +1,10 @@
 {
   "version": "0.13.0",
   "title": "LightCraft 0.13.0 for AROS x86_64 ABIv11",
-  "label": "aros1",
+  "label": "aros",
   "drawer": "LightCraft",
-  "archive": "LightCraft-0.13.0-aros1.x86_64-aros-v11.zip",
-  "source_archive": "LightCraft-0.13.0-aros1-source.zip",
+  "archive": "LightCraft-0.13.0.x86_64-aros-v11.zip",
+  "source_archive": "LightCraft-0.13.0-source.x86_64-aros-v11.zip",
   "release_notes": "RELEASE-NOTES.md",
   "stack": 16777216,
   "icon_source": "work:assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png",

@@ -6,7 +6,7 @@ Photo library and non-destructive RAW editor for AROS x86_64 ABIv11 and ABIv1, b
 
 Download the program ZIP from [Releases](https://github.com/tomaszstaniak/aros-lightcraft/releases), then unpack it to a writable drawer. Double-click LightCraft in Workbench. From Shell, set `Stack 16777216` and run `LightCraft [image]`.
 
-With arospkg 0.6 or later:
+With arospkg 0.6 or later, the catalogue selects the separate v1 or v11 variant for your system. Both use version 0.13.0:
 
 ```
 apkg update
@@ -53,10 +53,10 @@ See [feature status and work for later builds](docs/features.md) for the individ
 
 Choose the archive matching the system ABI:
 
-| ABI | Release | Runtime |
+| ABI | Program archive | Runtime |
 |---|---|---|
-| v11 | 0.13.0-aros1 | Existing v11 runtime |
-| v1 | 0.13.0-aros2 | Experimental coherent runtime: fd.library 51, posixc.library 0.41 and matching stdc.library and AROSTCP |
+| v11 | `LightCraft-0.13.0.x86_64-aros-v11.zip` | Existing v11 runtime |
+| v1 | `LightCraft-0.13.0.x86_64-aros-v1.zip` | Experimental coherent runtime: fd.library 51, posixc.library 0.41 and matching stdc.library and AROSTCP |
 
 The v1 archive requires the runtime described in [the SDK recipe](docs/sdk-v1.md); current stock mainline does not contain all its prerequisites. The application archive does not replace system libraries. Shell launches need a 16 MiB stack; the Workbench icon supplies it. Large images and procedural demo images can take time to process.
 

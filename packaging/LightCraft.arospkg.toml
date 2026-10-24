@@ -1,5 +1,5 @@
 id              = "lightcraft"
-version         = "0.13.0-aros1"
+version         = "0.13.0"
 summary         = "Photo library and non-destructive RAW editor with CPU rendering"
 category        = "graphics/edit"
 license         = "MIT OR Apache-2.0"
@@ -39,7 +39,7 @@ id = "iffparse.library"
 
 [source]
 repository = "https://github.com/tomaszstaniak/aros-lightcraft"
-revision = "v0.13.0-aros1"
+revision = "v0.13.0"
 built_with = "x86_64 ABIv11, GCC 10.5.0, Rust 1.100.0-nightly (rust-aros), -nix"
 
 [launch]

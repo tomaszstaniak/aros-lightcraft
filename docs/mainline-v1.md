@@ -6,7 +6,7 @@ The qualified x86_64 SDK used for this build is an integration candidate, not a 
 
 This profile requires the proposed fd.library51/posixc0.41 runtime and its matching headers, socket ownership support and pthread2 source. Those proposals are recorded in upstreams.json. The existing older mainline system is not a matching runtime. Building and linking do not qualify native execution.
 
-Use the v1 recipe at `v0.13.0-aros2`; `v0.13.0-aros1` preserves the v11 release recipe.
+The shared release is `v0.13.0`. Program and source archive names identify ABIv1 or ABIv11. Use the matching source archive to preserve the exact build recipe for each ABI.
 
 Create var/ and copy local.v1.example.json to var/local-v1.json and supply the qualified SDK installation, matching C SDK/tools and original libc archive. Obtain libc0.2.190 from crates.io and check its SHA256 against patches/crates/crates.json. Its AROS bindings are reconstructed from the two versioned patches. Keep the v1 cache and build root separate from v11.
 

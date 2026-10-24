@@ -70,7 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
     parser.add_argument('--dist', type=Path, required=True)
-    parser.add_argument('--version', default='0.13.0-aros2')
+    parser.add_argument('--version', default='0.13.0')
     parser.add_argument('--readme', type=Path, required=True)
     parser.add_argument('--reuse-debug', type=Path, help='reuse hash-matched owned debug files for a metadata-only repack')
     args = parser.parse_args()
