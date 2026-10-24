@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 10:17:57 +0200
+Subject: [PATCH] Report the selected native ABI in the AROS frontend
+
+---
+ apps/lightcraft-aros/src/main.rs   | 2 +-
+ apps/lightcraft-aros/src/native.rs | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/apps/lightcraft-aros/src/main.rs b/apps/lightcraft-aros/src/main.rs
+index 05ab6c0c509b48faf80f00c9095807a2e2ed540c..bb4a70d2ecbe73a59bec8b02bf52b5017cb59733 100644
+--- a/apps/lightcraft-aros/src/main.rs
++++ b/apps/lightcraft-aros/src/main.rs
+@@ -7,7 +7,7 @@ fn main() -> std::process::ExitCode {
+     return native::main();
+     #[cfg(not(target_os = "aros"))]
+     {
+-        eprintln!("LightCraft AROS requires x86_64 AROS ABIv11");
++        eprintln!("LightCraft requires native AROS");
+         std::process::ExitCode::FAILURE
+     }
+ }
+diff --git a/apps/lightcraft-aros/src/native.rs b/apps/lightcraft-aros/src/native.rs
+index d26599b4ba19f31989a6c66d3c6eedde130f978e..971aeeb80d4d587fbda3ee75a852a65615c085db 100644
+--- a/apps/lightcraft-aros/src/native.rs
++++ b/apps/lightcraft-aros/src/native.rs
+@@ -1,3 +1,4 @@
++const TARGET_ABI: &str = match option_env!("LIGHTCRAFT_BUILD_ABI") { Some(abi) => abi, None => "AROS" };
+ use lightcraft_aros_platform as platform;
+ use lightcraft_launch_config::{Capabilities, Request};
+ use lightcraft_ui_egui::{LightcraftApp, Services};
+@@ -108,13 +109,13 @@ pub fn main() -> std::process::ExitCode {
+     let args: Vec<String> = if startup.workbench { Vec::new() } else { std::env::args().skip(1).collect() };
+     if args.iter().any(|a| a == "--help" || a == "-h") {
+         println!(
+-            "LightCraft 0.13.0 AROS x86_64 ABIv11\nUsage: LightCraft [OPTIONS] [FILES...]\n  --library DRAWER   persistent catalog (default: PROGDIR:LightCraftData/Library)\n  --demo             procedural demo library\n  --script FILE      sequential JSON-lines control requests\n  --report FILE      script replies (JSON lines)\n  --frames N         close after N frames (diagnostics)\n  --screenshot FILE  capture final CPU window frame\n{}",
++            "LightCraft 0.13.0 AROS x86_64 {TARGET_ABI}\nUsage: LightCraft [OPTIONS] [FILES...]\n  --library DRAWER   persistent catalog (default: PROGDIR:LightCraftData/Library)\n  --demo             procedural demo library\n  --script FILE      sequential JSON-lines control requests\n  --report FILE      script replies (JSON lines)\n  --frames N         close after N frames (diagnostics)\n  --screenshot FILE  capture final CPU window frame\n{}",
+             lightcraft_launch_config::HELP
+         );
+         return std::process::ExitCode::SUCCESS;
+     }
+     if args.iter().any(|a| a == "--version") {
+-        println!("LightCraft 0.13.0 AROS x86_64 ABIv11");
++        println!("LightCraft 0.13.0 AROS x86_64 {TARGET_ABI}");
+         return std::process::ExitCode::SUCCESS;
+     }
+     let (request, args) = match Request::parse(&args, &startup.tooltypes) {

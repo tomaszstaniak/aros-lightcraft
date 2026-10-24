@@ -11,7 +11,10 @@
       "name": "parking_lot_core",
       "version": "0.9.12",
       "checksum": "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1",
-      "tree_sha256": "ff637e8e25c844311983b6ee38b381681298d1004fd5c7bab5680e1fbff6481a"
+      "tree_sha256": "ff637e8e25c844311983b6ee38b381681298d1004fd5c7bab5680e1fbff6481a",
+      "profiles": [
+        "v11"
+      ]
     },
     {
       "name": "getrandom",
@@ -33,6 +36,15 @@
       "patch_key": "getrandom04",
       "checksum": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
       "tree_sha256": "7851287bb0905e2a7e3faa4b8486d26e726ddcbdb9b3de592930cefb2cfdc9f7"
+    },
+    {
+      "name": "libc",
+      "version": "0.2.190",
+      "checksum": "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78",
+      "tree_sha256": "50604e37868c2e4ad5e1b169229e36d5d870be289c2bf60e307abc104b4c7fab",
+      "profiles": [
+        "v1"
+      ]
     }
   ]
 }

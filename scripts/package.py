@@ -303,7 +303,10 @@ def main():
             with tarfile.open(fileobj=packed, mode="w:xz") as tar:
                 tar.add(std_source, arcname="rust", recursive=True)
             bundle.writestr(prefix + "sources/rust-std.tar.xz", packed.getvalue())
+            active_crates = {(info["package"], info["version"]) for info in manifest["crates"].values()}
             for spec in json.loads((REPO / "patches/crates/crates.json").read_text())["crates"]:
+                if (spec["name"], spec["version"]) not in active_crates:
+                    continue
                 name = f"{spec['name']}-{spec['version']}.crate"
                 crate = next(Path(lcconfig.load()["cargo_home"]).glob("registry/cache/*/"+name))
                 bundle.writestr(prefix + "sources/crates/" + name, crate.read_bytes())

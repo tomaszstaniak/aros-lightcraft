@@ -58,6 +58,7 @@ Paths accept AmigaDOS volumes and assigns. UTF-8 filenames are supported; native
 ## Source
 
 - [Build instructions](docs/development.md)
+- [Mainline v1 build profile and requirements](docs/mainline-v1.md)
 - [Patch workflow](docs/patching.md)
 - [Generated files](docs/cleanup.md)
 

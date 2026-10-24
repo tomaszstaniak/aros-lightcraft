@@ -116,6 +116,12 @@ def check_upstream(rid, spec):
 # ---------------------------------------------------------------- commands
 
 def cmd_deps(args):
+    cfg = lcconfig.load(["cargo_home"])
+    if cfg["native_profile"] == "v1":
+        cfg = lcconfig.load(["official_sdk", "cargo_home"])
+        prefix = Path(cfg["official_sdk"])
+        source = check_upstream("lightcraft", upstreams()["lightcraft"])
+        return run([prefix / "bin/cargo", "fetch", "--locked", "--manifest-path", source / "Cargo.toml"], env=dict(os.environ, CARGO_HOME=cfg["cargo_home"], RUSTC=str(prefix / "bin/rustc")), capture=False)
     cfg = lcconfig.load(["cargo_home", "toolchain"])
     source = check_upstream("lightcraft", upstreams()["lightcraft"])
     run(["cargo", "+" + cfg["toolchain"], "fetch", "--locked", "--manifest-path", source / "Cargo.toml"],
@@ -239,7 +245,7 @@ def cmd_verify(args):
     spec = upstreams()["lightcraft"]
     base = check_upstream("lightcraft", spec)
     with tempfile.TemporaryDirectory(prefix="lightcraft verify ") as tmp:
-        dest = Path(tmp) / "word craft"
+        dest = Path(tmp) / "lightcraft source"
         apply_series(dest, base, spec["commit"])
         rebuilt = git(dest, "rev-parse", "HEAD^{tree}")
     print(f"series rebuilt tree {rebuilt}")
@@ -261,6 +267,8 @@ def cmd_crates(args, quiet=False):
     cfg = lcconfig.load(["cargo_home", "build_root"])
     out = {}
     for spec in crate_specs():
+        if spec.get("profiles") and cfg["native_profile"] not in spec["profiles"]:
+            continue
         name = f"{spec['name']}-{spec['version']}"
         dest = Path(cfg["build_root"]) / "crates" / name
         if not dest.exists():
@@ -430,6 +438,12 @@ def build_pthread(cfg, root):
 
 def cmd_build(args):
     cmd_verify(args)
+    if lcconfig.load()["native_profile"] == "v1":
+        import native_v1
+        try:
+            return native_v1.build(args, lcconfig.load())
+        except native_v1.Failure as error:
+            raise Failure(str(error)) from error
     cfg = lcconfig.load(["aros_gcc", "aros_ar", "aros_sdk", "aros_src", "rust_aros", "toolchain", "cargo_home", "build_root"])
     for name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_DIR",
                  "CARGO_PROFILE_RELEASE_PANIC"):
@@ -526,7 +540,7 @@ def cmd_build(args):
         command.append("--no-default-features")
     if args.features:
         command += ["--features", args.features]
-    env = dict(os.environ, CARGO_HOME=cfg["cargo_home"], CARGO_TARGET_DIR=str(root / "target"),
+    env = dict(os.environ, LIGHTCRAFT_BUILD_ABI="ABIv11", CARGO_HOME=cfg["cargo_home"], CARGO_TARGET_DIR=str(root / "target"),
                AROS_CC=cfg["aros_gcc"], AROS_GCC=cfg["aros_gcc"], AROS_AR=cfg["aros_ar"], AROS_SDK=cfg["aros_sdk"])
     build_id = str(uuid.uuid4())
     out = root / "out" / f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{build_id[:8]}"

@@ -14,10 +14,13 @@ ABI = "v11"
 
 # key: (environment variable, default, description)
 SETTINGS = {
+    "native_profile": ("LIGHTCRAFT_NATIVE_PROFILE", "v11", "native profile: v11 or official v1"),
+    "official_sdk": ("LIGHTCRAFT_OFFICIAL_SDK", None, "qualified official mainline Rust installation prefix"),
+    "official_libc_archive": ("LIGHTCRAFT_OFFICIAL_LIBC_ARCHIVE", None, "original libc crate archive for the official profile"),
     "aros_gcc": ("LIGHTCRAFT_AROS_GCC", None, "x86_64 AROS C compiler driver matching the SDK"),
     "aros_ar": ("LIGHTCRAFT_AROS_AR", None, "archiver from the same toolchain"),
     "aros_strip": ("LIGHTCRAFT_AROS_STRIP", None, "strip from the same toolchain (optional)"),
-    "aros_sdk": ("LIGHTCRAFT_AROS_SDK", None, "ABIv11 SDK used as --sysroot"),
+    "aros_sdk": ("LIGHTCRAFT_AROS_SDK", None, "native ABI-matched C SDK used as --sysroot"),
     "rust_aros": ("LIGHTCRAFT_RUST_AROS", None, "rust-aros Git checkout (target template, libc-aros)"),
     "rust_aros_commit": ("LIGHTCRAFT_RUST_AROS_COMMIT", "7b00bb2aab0622788e60601f39f5cf79b63c3509",
                          "rust-aros commit whose target template and libc-aros are used"),
@@ -60,15 +63,17 @@ def load(required=()):
     for key, (env, default, _) in SETTINGS.items():
         value = os.environ.get(env) or local.get(key) or default
         out[key] = value
-    paths = ("aros_gcc", "aros_ar", "aros_strip", "aros_sdk", "rust_aros", "aros_src", "egui_aros", "egui_upstream_root", "cargo_home", "build_root")
+    paths = ("official_sdk", "official_libc_archive", "aros_gcc", "aros_ar", "aros_strip", "aros_sdk", "rust_aros", "aros_src", "egui_aros", "egui_upstream_root", "cargo_home", "build_root")
     for key in paths:
         if out[key] and not os.path.isabs(out[key]):
             base = REPO if os.environ.get(SETTINGS[key][0]) or key not in local else (local_path.parent if local_path else REPO)
-            out[key] = str(base / out[key])
+            out[key] = str((base / out[key]).resolve())
     missing = [key for key in required if not out.get(key)]
     if missing:
         lines = [f"  {k}: set {SETTINGS[k][0]} or \"{k}\" in local.json ({SETTINGS[k][2]})" for k in missing]
         raise ConfigError("missing configuration:\n" + "\n".join(lines))
+    if out["native_profile"] not in ("v11", "v1"):
+        raise ConfigError("native_profile must be v11 or v1")
     if out["panic"] not in ("unwind", "abort"):
         raise ConfigError("panic must be unwind or abort")
     return out

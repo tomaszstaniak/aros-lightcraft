@@ -1,0 +1,21 @@
+From: LightCraft AROS port
+Subject: [PATCH] Declare the mainline pthread2 condition-attribute clock API
+
+The selected pthread.h declares these functions using clockid_t and the
+qualified pthread_condattr_t layout. parking_lot_core needs setclock for
+CLOCK_MONOTONIC waits. This adds bindings to existing implementations, not
+an alternate wait implementation. Link the privately rebuilt matching pthread
+sources; the old SDK archive lacks these symbols. Native execution unverified.
+Upstream-status: draft https://github.com/jonx/AROS/pull/1
+---
+--- a/src/unix/aros/mod.rs
++++ b/src/unix/aros/mod.rs
+@@ -837,6 +837,8 @@
+     pub fn arc4random_buf(buf: *mut c_void, nbytes: size_t);
+     pub fn arc4random_uniform(upper_bound: u32) -> u32;
+ 
++    pub fn pthread_condattr_setclock(attr: *mut pthread_condattr_t, clock: clockid_t) -> c_int;
++    pub fn pthread_condattr_getclock(attr: *const pthread_condattr_t, clock: *mut clockid_t) -> c_int;
+     pub fn clock_gettime(clk_id: clockid_t, tp: *mut crate::timespec) -> c_int;
+     pub fn gettimeofday(tp: *mut crate::timeval, tz: *mut c_void) -> c_int;
+ 

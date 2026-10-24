@@ -1,0 +1,13 @@
+{
+  "native_profile": "v1",
+  "official_sdk": "/path/to/qualified-official-x86_64-sdk",
+  "official_libc_archive": "/path/to/libc-0.2.190.crate",
+  "aros_gcc": "/path/to/qualified-official-x86_64-sdk/bin/x86_64-aros-cc",
+  "aros_ar": "/path/to/x86_64-aros-ar",
+  "aros_sdk": "/path/to/matching-v1-c-sdk",
+  "egui_aros": "/path/to/egui-aros",
+  "egui_upstream_root": "/path/to/egui-aros/upstream",
+  "panic": "abort",
+  "cargo_home": "../deps/v1/cargo-home",
+  "build_root": "../build/v1"
+}

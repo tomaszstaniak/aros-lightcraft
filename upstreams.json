@@ -6,13 +6,19 @@
       "tag": "v0.13.0",
       "license": "MIT OR Apache-2.0",
       "role": "build source; patches/lightcraft/series applies in order",
-      "port_commit": "168794820451eae757ad62406b9597cfcdbf1297"
+      "port_commit": "66cb29e007251cd58a7ea2666687be518421424a"
     },
     "egui-aros": {
       "url": "https://github.com/tomaszstaniak/egui-aros.git",
       "commit": "794d6825cde0838fa04584fbc2124c882755ebdb",
       "license": "MIT OR Apache-2.0",
       "role": "shared GUI integration; egui 0.36.2; consume via vendor tooling, never copy a frontend"
+    },
+    "aros-v1-pthread": {
+      "url": "https://github.com/jonx/AROS.git",
+      "commit": "0953c6861627e396f7901ce831e8b764cef8c335",
+      "license": "APL-1.1; see per-file notices",
+      "role": "mainline pthread2 sources matching official v1 headers; private static rebuild only"
     }
   },
   "build_inputs": {
@@ -23,5 +29,35 @@
     "path_mode": "-nix",
     "default_gui_renderer": "CPU",
     "default_image_compute": "CPU"
+  },
+  "build_profiles": {
+    "v11": {
+      "compiler": "0dfb098f3aeecbe38c2566ca090193280e7349e7",
+      "panic": "unwind",
+      "runtime": "accepted x86_64 ABIv11 release v0.13.0-aros1"
+    },
+    "v1": {
+      "compiler": "504869653f510b279c542e65ccd1ea9710c119ba",
+      "channel": "nightly-2026-08-04",
+      "panic": "abort",
+      "libc": "0.2.190 with versioned mainline bindings",
+      "runtime": "unverified; requires fd51 and posixc0.41 proposal residents plus matching private pthread2 link library",
+      "runtime_sources": {
+        "fd": "5839f00ec7f700d047c214961105c6564ad80b87",
+        "arostcp": "3ee5c32b3cdc375cd63563c5857dd8f6cb7e2cfc",
+        "crt": "0953c6861627e396f7901ce831e8b764cef8c335",
+        "rust": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60"
+      }
+    }
+  },
+  "submissions": {
+    "mainline-libc-clock": {
+      "repository": "https://github.com/jonx/AROS.git",
+      "base": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60",
+      "commit": "7a2ad2eb70bda23b5917ba730c89258ca45a5c80",
+      "series": "patches/mainline-libc-clock/series",
+      "status": "submitted draft; runtime unverified",
+      "url": "https://github.com/jonx/AROS/pull/1"
+    }
   }
 }

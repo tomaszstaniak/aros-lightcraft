@@ -1,0 +1,35 @@
+From 7a2ad2eb70bda23b5917ba730c89258ca45a5c80 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 10:55:11 +0200
+Subject: [PATCH] rust libc: declare pthread condition-attribute clock
+ functions
+
+---
+ tools/crosstools/rust/crates/libc-0.2.190-aros.diff | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tools/crosstools/rust/crates/libc-0.2.190-aros.diff b/tools/crosstools/rust/crates/libc-0.2.190-aros.diff
+index 3ebfca11..a1ee7052 100644
+--- a/tools/crosstools/rust/crates/libc-0.2.190-aros.diff
++++ b/tools/crosstools/rust/crates/libc-0.2.190-aros.diff
+@@ -34,7 +34,7 @@ diff -ruN -x .cargo-checksum.json -x Cargo.toml.orig -x .cargo_vcs_info.json -x
+ diff -ruN -x .cargo-checksum.json -x Cargo.toml.orig -x .cargo_vcs_info.json -x target -x Cargo.lock a/src/unix/aros/mod.rs b/src/unix/aros/mod.rs
+ --- a/src/unix/aros/mod.rs	1970-01-01 01:00:00.000000000 +0100
+ +++ b/src/unix/aros/mod.rs	2026-10-17 20:51:26.428538096 +0100
+-@@ -0,0 +1,1066 @@
++@@ -0,0 +1,1068 @@
+ +//! Bindings for the AROS C library (posixc.library / stdc.library) and
+ +//! pthread.library, as shipped in the AROS SDK.
+ +//!
+@@ -867,6 +867,8 @@ diff -ruN -x .cargo-checksum.json -x Cargo.toml.orig -x .cargo_vcs_info.json -x
+ +    pub fn arc4random_buf(buf: *mut c_void, nbytes: size_t);
+ +    pub fn arc4random_uniform(upper_bound: u32) -> u32;
+ +
+++    pub fn pthread_condattr_setclock(attr: *mut pthread_condattr_t, clock: clockid_t) -> c_int;
+++    pub fn pthread_condattr_getclock(attr: *const pthread_condattr_t, clock: *mut clockid_t) -> c_int;
+ +    pub fn clock_gettime(clk_id: clockid_t, tp: *mut crate::timespec) -> c_int;
+ +    pub fn gettimeofday(tp: *mut crate::timeval, tz: *mut c_void) -> c_int;
+ +
+-- 
+2.54.0 (Apple Git-157)
+

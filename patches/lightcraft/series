@@ -5,3 +5,4 @@
 0005-Separate-native-export-fields-from-engine-paths-and-.patch
 0006-Propagate-native-export-field-errors-through-menu-co.patch
 0007-Cancel-AROS-procedural-generations-between-rows-with.patch
+0008-Report-the-selected-native-ABI-in-the-AROS-frontend.patch
