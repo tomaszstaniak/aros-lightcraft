@@ -8,3 +8,5 @@ updated: 2026-10-24
 - [Development](development.md)
 - [Patches](patching.md)
 - [Cleanup](cleanup.md)
+
+- [Optional features and limitations](features.md)

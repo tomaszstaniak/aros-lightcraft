@@ -39,7 +39,17 @@ Requested and selected modes are recorded in `LightCraft.log` inside the program
 
 ## Supported files and limitations
 
-PNG, JPEG, TIFF, WebP and JPEG XL import and export are included, along with RAW development and AVIF export. RAW support varies by camera. AVIF import, HEIF, neural denoise and SAM are unavailable in this build. MCP stdio and network model downloads are disabled. No models are downloaded at startup.
+PNG, JPEG, TIFF, WebP and JPEG XL import and export are included, along with RAW development and AVIF export. RAW support varies by camera. LightCraft uses its own codec libraries.
+
+The limitations have separate causes:
+
+- **AVIF import:** the pinned upstream has no decoder. AVIF export works.
+- **HEIF/HEIC:** the optional upstream Rust decoder is not enabled in this build; AROS compatibility remains to be established.
+- **Neural denoise and SAM:** optional inference features are not enabled. Upstream provides CPU execution; dependencies, local models, memory and processing time need further work.
+- **MCP stdio:** the port blocks it until the stdin reader can be interrupted and shut down safely, including after a broken output connection.
+- **Model downloads:** the port blocks them pending verification of DNS cancellation and worker shutdown. This is a lifecycle restriction, not a networking capability claim.
+
+See [feature status and work for later builds](https://github.com/tomaszstaniak/aros-lightcraft/blob/main/docs/features.md) for the individual causes and remaining tasks. No model is downloaded automatically.
 
 This release is for x86_64 ABIv11. It does not run on mainline ABIv1. Shell launches need a 16 MiB stack; the Workbench icon supplies it. Large images and procedural demo images can take time to process.
 
