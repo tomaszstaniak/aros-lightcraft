@@ -1,0 +1,263 @@
+From 25bb338ec432e257a74c28d43dad4be523ecbb50 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 13:06:06 +0200
+Subject: [PATCH] rust: match Path grammar to explicit nix startup
+
+---
+ tools/crosstools/rust/unmodified/build.py     | 15 ++++---
+ .../rust/unmodified/rust-src-aros.diff        | 44 +++++++++----------
+ .../rust/unmodified/test-source-paths.py      |  3 +-
+ 3 files changed, 34 insertions(+), 28 deletions(-)
+
+diff --git a/tools/crosstools/rust/unmodified/build.py b/tools/crosstools/rust/unmodified/build.py
+index 0d371577..d7a5bcbe 100644
+--- a/tools/crosstools/rust/unmodified/build.py
++++ b/tools/crosstools/rust/unmodified/build.py
+@@ -42,16 +42,20 @@ def run(command, *, cwd=None, env=None, log=None):
+ MIN_BUILD_FREE = 6 * 1024**3
+ 
+ 
+-def std_rustflags(output, sources):
++def std_rustflags(output, sources, cc_args=()):
+     """Keep source locations useful without embedding workstation directories.
+ 
+     The more specific mapping is last because rustc checks mappings in reverse
+     order. This applies while compiling std, before file! and panic locations
+     become constants in the installed rlibs.
+     """
+-    return ["-C", "embed-bitcode=yes",
++    flags = ["-C", "embed-bitcode=yes",
++             "--check-cfg=cfg(aros_nix_paths)",
+             "--remap-path-prefix=" + str(output) + "=/aros-build",
+             "--remap-path-prefix=" + str(sources) + "=/rust-src"]
++    if "-nix" in cc_args:
++        flags.append("--cfg=aros_nix_paths")
++    return flags
+ 
+ 
+ def std_build_command(cargo, sources, manifest, target, jobs):
+@@ -170,7 +174,7 @@ def main():
+                        CARGO_INCREMENTAL="0", CARGO_HOME=str(output / "cargo-home"),
+                        # Installed rlibs must support consumers using fat/thin
+                        # LTO as well as ordinary native-object linking.
+-                       CARGO_ENCODED_RUSTFLAGS="\x1f".join(std_rustflags(output, sources)))
++                       CARGO_ENCODED_RUSTFLAGS="\x1f".join(std_rustflags(output, sources, args.cc_arg)))
+     cfg = run([str(wrapper), "-Zunstable-options", "--print", "cfg", "--target",
+                str(target)], env=environment)
+     (output / "target-cfg.txt").write_text(cfg)
+@@ -224,7 +228,7 @@ def main():
+         shutil.copy2(library, target_library / library.name)
+     archive = output / "std-probe.a"
+     shutil.copyfile(archives[0], archive)
+-    result = {"source_manifest_sha256": digest(HERE / "source-files.json"), "native_inputs": frozen_native, "profile": profile, "official_compiler": str(compiler), "official_cargo": cargo, "build_jobs": args.jobs, "std_rustflags": std_rustflags(output, sources), "probe": args.probe, "probe_sha256": digest(probe_source),
++    result = {"source_manifest_sha256": digest(HERE / "source-files.json"), "native_inputs": frozen_native, "profile": profile, "official_compiler": str(compiler), "official_cargo": cargo, "build_jobs": args.jobs, "std_rustflags": std_rustflags(output, sources, args.cc_arg), "path_mode": "nix" if "-nix" in args.cc_arg else "amigados", "probe": args.probe, "probe_sha256": digest(probe_source),
+               "precompiled_std": {p.name: digest(p) for p in std_rlibs},
+               "compiler_commit": COMMIT, "compiler_sha256": compiler_sha256,
+               "target_sha256": digest(target), "std_patch_sha256": digest(HERE / "rust-src-aros.diff"),
+@@ -298,7 +302,8 @@ def main():
+         environment["COMPILER_PATH"] = str(shim)
+         binary = output / ("RustNetworkProbe" if args.probe == "network" else "RustStdProbe")
+         command = [str(args.collect_aros.resolve()), "--eh-frame-hdr", "-L" + str(sdk / "lib"),
+-                   "-o", str(binary), str(sdk / "lib/startup.o"), str(output / "main.o"),
++                   "-o", str(binary), str(sdk / "lib/startup.o"),
++                   *([str(sdk / "lib/nixmain.o")] if "-nix" in args.cc_arg else []), str(output / "main.o"),
+                    *adapters, str(archive), "-(", *positional_archives, "-lposixc", "-lstdcio", "-lstdc", "-lpthread",
+                    "-lamiga", "-larossupport", "-llibinit", "-lautoinit", "-ldos",
+                    "-lutility", "-lexec", "-)"]
+diff --git a/tools/crosstools/rust/unmodified/rust-src-aros.diff b/tools/crosstools/rust/unmodified/rust-src-aros.diff
+index f1d00e2b..ea5fdbf6 100644
+--- a/tools/crosstools/rust/unmodified/rust-src-aros.diff
++++ b/tools/crosstools/rust/unmodified/rust-src-aros.diff
+@@ -2289,7 +2289,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+ +    /// A native AROS volume, device, or assign name, excluding its final colon.
+ +    /// PrefixComponent::as_os_str() includes the colon; the following RootDir
+ +    /// is implicit and also spells `:`. Names retain their original OsStr bytes.
+-+    #[cfg(target_os = "aros")]
+++    #[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +    #[stable(feature = "aros_native_paths", since = "1.99.0")]
+ +    ArosVolume(#[stable(feature = "aros_native_paths", since = "1.99.0")] &'a OsStr),
+ +
+@@ -2300,7 +2300,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+              UNC(x, y) => 2 + os_str_len(x) + if os_str_len(y) > 0 { 1 + os_str_len(y) } else { 0 },
+              DeviceNS(x) => 4 + os_str_len(x),
+              Disk(_) => 2,
+-+            #[cfg(target_os = "aros")]
+++            #[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +            ArosVolume(name) => os_str_len(name) + 1,
+          }
+      }
+@@ -2329,14 +2329,14 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      pub fn as_os_str(self) -> &'a OsStr {
+          match self {
+              Component::Prefix(p) => p.as_os_str(),
+-+            #[cfg(not(target_os = "aros"))]
+++            #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+              Component::RootDir => OsStr::new(MAIN_SEPARATOR_STR),
+-+            #[cfg(target_os = "aros")]
+++            #[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +            Component::RootDir => OsStr::new(":"),
+              Component::CurDir => OsStr::new("."),
+-+            #[cfg(not(target_os = "aros"))]
+++            #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+              Component::ParentDir => OsStr::new(".."),
+-+            #[cfg(target_os = "aros")]
+++            #[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +            Component::ParentDir => OsStr::new("/"),
+              Component::Normal(path) => path,
+          }
+@@ -2358,7 +2358,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  #[derive(Clone)]
+  #[must_use = "iterators are lazy and do nothing unless consumed"]
+  #[stable(feature = "rust1", since = "1.0.0")]
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  pub struct Components<'a> {
+      // The path left to parse components from
+      path: &'a [u8],
+@@ -2367,7 +2367,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  }
+  
+ +// DOS grammar is intentionally separate from the Unix/Windows state machine.
+-+#[cfg(target_os = "aros")]
+++#[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +#[derive(Clone)]
+ +#[must_use = "iterators are lazy and do nothing unless consumed"]
+ +#[stable(feature = "rust1", since = "1.0.0")]
+@@ -2376,10 +2376,10 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+ +    prefix: Option<Prefix<'a>>,
+ +}
+ +
+-+#[cfg(target_os = "aros")]
+++#[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +#[path = "path/aros.rs"]
+ +mod aros;
+-+#[cfg(target_os = "aros")]
+++#[cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +use self::aros::compare_components;
+ +
+  /// An iterator over the [`Component`]s of a [`Path`], as [`OsStr`] slices.
+@@ -2389,7 +2389,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      }
+  }
+  
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  impl<'a> Components<'a> {
+      // how long is the prefix, if any?
+      #[inline]
+@@ -2397,7 +2397,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  impl FusedIterator for Iter<'_> {}
+  
+  #[stable(feature = "rust1", since = "1.0.0")]
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  impl<'a> Iterator for Components<'a> {
+      type Item = Component<'a>;
+  
+@@ -2405,7 +2405,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  }
+  
+  #[stable(feature = "rust1", since = "1.0.0")]
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  impl<'a> DoubleEndedIterator for Components<'a> {
+      fn next_back(&mut self) -> Option<Component<'a>> {
+          while !self.finished() {
+@@ -2413,7 +2413,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  impl FusedIterator for Components<'_> {}
+  
+  #[stable(feature = "rust1", since = "1.0.0")]
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  impl<'a> PartialEq for Components<'a> {
+      #[inline]
+      fn eq(&self, other: &Components<'a>) -> bool {
+@@ -2421,7 +2421,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      }
+  }
+  
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  fn compare_components(mut left: Components<'_>, mut right: Components<'_>) -> cmp::Ordering {
+      // Fast path for long shared prefixes
+      //
+@@ -2429,7 +2429,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+          self._push(path.as_ref())
+      }
+  
+-+    #[cfg(not(target_os = "aros"))]
+++    #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+      fn _push(&mut self, path: &Path) {
+          // in general, a separator is needed if the rightmost byte is not a separator
+          let buf = self.inner.as_encoded_bytes();
+@@ -2448,7 +2448,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      #[unstable(feature = "path_trailing_sep", issue = "142503")]
+      #[must_use]
+      #[inline]
+-+    #[cfg(not(target_os = "aros"))]
+++    #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+      pub fn has_trailing_sep(&self) -> bool {
+          self.as_os_str().as_encoded_bytes().last().copied().is_some_and(is_sep_byte)
+      }
+@@ -2456,7 +2456,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      #[unstable(feature = "path_trailing_sep", issue = "142503")]
+      #[must_use]
+      #[inline]
+-+    #[cfg(not(target_os = "aros"))]
+++    #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+      pub fn trim_trailing_sep(&self) -> &Path {
+          if self.has_trailing_sep() && (!self.has_root() || self.parent().is_some()) {
+              let mut bytes = self.inner.as_encoded_bytes();
+@@ -2464,7 +2464,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+      ///
+      /// [`CurDir`]: Component::CurDir
+      #[stable(feature = "rust1", since = "1.0.0")]
+-+    #[cfg(not(target_os = "aros"))]
+++    #[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+      pub fn components(&self) -> Components<'_> {
+          let prefix = parse_prefix(self.as_os_str());
+          Components {
+@@ -2505,7 +2505,7 @@ diff --git a/library/std/src/path.rs b/library/std/src/path.rs
+  }
+  
+  #[stable(feature = "rust1", since = "1.0.0")]
+-+#[cfg(not(target_os = "aros"))]
+++#[cfg(not(all(target_os = "aros", not(aros_nix_paths))))]
+  impl Hash for Path {
+      fn hash<H: Hasher>(&self, h: &mut H) {
+          let bytes = self.as_u8_slice();
+@@ -2710,7 +2710,7 @@ diff --git a/library/std/src/sys/path/mod.rs b/library/std/src/sys/path/mod.rs
+  }
+  
+  cfg_select! {
+-+    target_os = "aros" => {
+++    all(target_os = "aros", not(aros_nix_paths)) => {
+ +        mod aros;
+ +        pub use aros::*;
+ +    }
+@@ -2721,7 +2721,7 @@ diff --git a/library/std/tests/path_aros.rs b/library/std/tests/path_aros.rs
+ --- /dev/null
+ +++ b/library/std/tests/path_aros.rs
+ @@ -0,0 +1,91 @@
+-+#![cfg(target_os = "aros")]
+++#![cfg(all(target_os = "aros", not(aros_nix_paths)))]
+ +#![feature(path_trailing_sep)]
+ +// SPDX-License-Identifier: MIT
+ +// Copyright (c) 2026 John Knipper
+diff --git a/tools/crosstools/rust/unmodified/test-source-paths.py b/tools/crosstools/rust/unmodified/test-source-paths.py
+index a64d7ca8..db15dc37 100644
+--- a/tools/crosstools/rust/unmodified/test-source-paths.py
++++ b/tools/crosstools/rust/unmodified/test-source-paths.py
+@@ -20,7 +20,8 @@ with tempfile.TemporaryDirectory(prefix="aros-std-path-test-") as directory:
+     source = sources / "diagnostic.rs"
+     source.write_text('#[unsafe(no_mangle)] pub fn diagnostic_path() -> &\'static str { file!() }\n')
+     target = output / "probe.ll"
+-    flags = builder.std_rustflags(output, sources)
++    flags = builder.std_rustflags(output, sources, ["-nix"])
++    assert "--cfg=aros_nix_paths" in flags, "-nix must select matching std Path grammar"
+     subprocess.run([os.environ["TEST_RUSTC"], "--crate-type=lib", "--emit=llvm-ir", *flags,
+                     str(source), "-o", str(target)], check=True)
+     result = target.read_text()
+-- 
+2.54.0 (Apple Git-157)
+

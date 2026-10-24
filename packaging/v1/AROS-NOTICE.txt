@@ -1,0 +1,23 @@
+Material built into LightCraft and lightcraft-cli for AROS x86_64 ABIv1
+====================================================================
+
+AROS startup, library stubs and POSIX threads
+  From the pinned mainline sources and patches recorded in upstreams.json
+  and patches/aros-v1-sdk/series, under the AROS Public License 1.1.
+  libpthread is linked statically from the matching C SDK. The application
+  does not replace system libraries. It requires a coherent fd.library 51,
+  posixc.library 0.41, stdc and AROSTCP runtime; see README.md.
+
+GCC runtime
+  GCC 10.5.0 libgcc, under GNU GPL version 3 with the GCC Runtime Library
+  Exception. The exception and license texts are included with the notices.
+
+Rust standard library
+  Built with official Rust nightly-2026-08-04 and the versioned AROS library
+  integration. Rust and its dependencies carry the licenses listed in
+  Rust/COPYRIGHT-library.html and Rust/licenses/.
+
+C library bindings
+  libc 0.2.190 with versioned AROS bindings, under MIT OR Apache-2.0.
+  Its license files and the other Cargo package notices are included in
+  THIRD-PARTY.txt. The v11 libc-aros entropy implementation is not used.

@@ -14,10 +14,12 @@ def clean(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "verify"])
+    parser.add_argument("--repository", choices=("lightcraft", "aros-v1-sdk"), default="lightcraft")
     args = parser.parse_args()
-    spec = json.loads((ROOT / "upstreams.json").read_text())["repositories"]["lightcraft"]
-    upstream, work = ROOT / "upstream/lightcraft", ROOT / "work/lightcraft"
-    series = [s.strip() for s in (ROOT / "patches/lightcraft/series").read_text().splitlines() if s.strip() and not s.lstrip().startswith("#")]
+    name = args.repository
+    spec = json.loads((ROOT / "upstreams.json").read_text())["repositories"][name]
+    upstream, work = ROOT / "upstream" / name, ROOT / "work" / name
+    series = [s.strip() for s in (ROOT / "patches" / name / "series").read_text().splitlines() if s.strip() and not s.lstrip().startswith("#")]
     if args.command == "prepare":
         if not upstream.exists():
             upstream.parent.mkdir(parents=True, exist_ok=True)
@@ -30,9 +32,9 @@ def main():
             raise SystemExit("Work copy exists; no reset performed. Use verify.")
         work.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--no-hardlinks", str(upstream), str(work)], check=True)
-        git(work, "switch", "-c", "port/v11-x86_64", spec["commit"])
+        git(work, "switch", "-c", "port/x86_64" if name == "lightcraft" else "port/lightcraft-v1-sdk", spec["commit"])
         for name in series:
-            git(work, "am", str(ROOT / "patches/lightcraft" / name))
+            git(work, "am", str(ROOT / "patches" / args.repository / name))
     clean(upstream)
     clean(work)
     if git(upstream, "rev-parse", "HEAD") != spec["commit"]:
@@ -41,7 +43,7 @@ def main():
         git(ROOT, "clone", "--quiet", "--no-hardlinks", "--no-checkout", str(upstream), tmp)
         git(tmp, "checkout", "--quiet", "--detach", spec["commit"])
         for name in series:
-            patch = ROOT / "patches/lightcraft" / name
+            patch = ROOT / "patches" / args.repository / name
             git(tmp, "apply", "--index", str(patch))
         expected = git(tmp, "write-tree")
         actual = git(work, "rev-parse", "HEAD^{tree}")

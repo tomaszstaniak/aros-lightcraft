@@ -14,11 +14,12 @@
       "license": "MIT OR Apache-2.0",
       "role": "shared GUI integration; egui 0.36.2; consume via vendor tooling, never copy a frontend"
     },
-    "aros-v1-pthread": {
+    "aros-v1-sdk": {
       "url": "https://github.com/jonx/AROS.git",
-      "commit": "0953c6861627e396f7901ce831e8b764cef8c335",
+      "commit": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60",
       "license": "APL-1.1; see per-file notices",
-      "role": "mainline pthread2 sources matching official v1 headers; private static rebuild only"
+      "role": "private official-profile SDK and coherent runtime reconstruction; patches/aros-v1-sdk/series",
+      "port_commit": "25bb338ec432e257a74c28d43dad4be523ecbb50"
     }
   },
   "build_inputs": {
@@ -41,13 +42,15 @@
       "channel": "nightly-2026-08-04",
       "panic": "abort",
       "libc": "0.2.190 with versioned mainline bindings",
-      "runtime": "unverified; requires fd51 and posixc0.41 proposal residents plus matching private pthread2 link library",
+      "runtime": "requires fd51/posixc0.41 and matching stdc/AROSTCP, a coherent pthread2 C SDK and -nix std",
       "runtime_sources": {
         "fd": "5839f00ec7f700d047c214961105c6564ad80b87",
         "arostcp": "3ee5c32b3cdc375cd63563c5857dd8f6cb7e2cfc",
         "crt": "0953c6861627e396f7901ce831e8b764cef8c335",
         "rust": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60"
-      }
+      },
+      "path_mode": "-nix",
+      "default_features": false
     }
   },
   "submissions": {

@@ -1,6 +1,6 @@
 # LightCraft for AROS
 
-Photo library and non-destructive RAW editor for AROS x86_64 ABIv11, based on LightCraft 0.13.0. The interface and image processing use the CPU.
+Photo library and non-destructive RAW editor for AROS x86_64 ABIv11 and ABIv1, based on LightCraft 0.13.0. The interface and image processing use the CPU.
 
 ## Install
 
@@ -51,7 +51,14 @@ The limitations have separate causes:
 
 See [feature status and work for later builds](docs/features.md) for the individual causes and remaining tasks. No model is downloaded automatically.
 
-This release is for x86_64 ABIv11. It does not run on mainline ABIv1. Shell launches need a 16 MiB stack; the Workbench icon supplies it. Large images and procedural demo images can take time to process.
+Choose the archive matching the system ABI:
+
+| ABI | Release | Runtime |
+|---|---|---|
+| v11 | 0.13.0-aros1 | Existing v11 runtime |
+| v1 | 0.13.0-aros2 | Experimental coherent runtime: fd.library 51, posixc.library 0.41 and matching stdc.library and AROSTCP |
+
+The v1 archive requires the runtime described in [the SDK recipe](docs/sdk-v1.md); current stock mainline does not contain all its prerequisites. The application archive does not replace system libraries. Shell launches need a 16 MiB stack; the Workbench icon supplies it. Large images and procedural demo images can take time to process.
 
 Paths accept AmigaDOS volumes and assigns. UTF-8 filenames are supported; native keyboard and clipboard conversion is limited to Latin-1. Export to the standard system disk and RAM: is supported. Writing directly to the root of some other volumes may return a system error; select a drawer on the destination volume.
 
@@ -59,6 +66,7 @@ Paths accept AmigaDOS volumes and assigns. UTF-8 filenames are supported; native
 
 - [Build instructions](docs/development.md)
 - [Mainline v1 build profile and requirements](docs/mainline-v1.md)
+- [Coherent v1 SDK and runtime recipe](docs/sdk-v1.md)
 - [Patch workflow](docs/patching.md)
 - [Generated files](docs/cleanup.md)
 

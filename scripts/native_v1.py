@@ -44,65 +44,35 @@ def read_installation(prefix):
     return data
 
 
-def build_pthread(cfg, root):
-    """Use the same pthread2 source as the qualified headers, never the old SDK archive."""
-    import io
-    import tarfile
-    spec = lc.upstreams()["aros-v1-pthread"]
-    upstream = lc.check_upstream("aros-v1-pthread", spec)
-    dest = root / ("pthread-v1-" + spec["commit"][:12])
-    source = dest / "compiler/pthread"
-    if not source.exists():
-        dest.mkdir(parents=True, exist_ok=True)
-        data = lc.run(["git", "-C", upstream, "archive", "--format=tar", spec["commit"], "compiler/pthread", "LICENSE"]).stdout
-        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-            tar.extractall(dest, filter="data")
-    for name in ("pthread.h", "semaphore.h", "sched.h"):
-        if (source / name).read_bytes() != (Path(cfg["aros_sdk"]) / "include" / name).read_bytes():
-            raise Failure("pthread source differs from the qualified SDK header: " + name)
-    names, collecting = [], False
-    for line in (source / "mmakefile.src").read_text().splitlines():
-        if line.startswith(("LINKLIBFILES", "PTHREADFUNCS")):
-            collecting = True
-            line = line.split(":=", 1)[1]
-        if collecting:
-            names += [n for n in line.replace("\\", " ").split() if n]
-            collecting = line.rstrip().endswith("\\")
-    objects = dest / "objects"
-    objects.mkdir(exist_ok=True)
-    commands = []
-    for name in names:
-        command = [cfg["aros_gcc"], "-O2", "-mcmodel=large", "-fno-omit-frame-pointer", "-fno-pic",
-                   "-I", str(source), "-c", str(source / (name + ".c")), "-o", str(objects / (name + ".o"))]
-        commands.append(command)
-        lc.run(command)
-    archive = dest / "libpthread-v1.a"
-    lc.run([cfg["aros_ar"], "rcs", archive, *[objects / (n + ".o") for n in names]])
-    # The upstream archive contains an alternate implementation of this one function.
-    # Normal archive extraction selects pthread.o first; explicit pre-link objects
-    # must make that same selection rather than define it twice.
-    prelink_members = [n for n in names if n != "pthread_attr_setstacksize"]
-    # Reject a changed provider inventory before constructing an explicit-object link.
-    nm = str(Path(cfg["aros_ar"]).with_name(Path(cfg["aros_ar"]).name.removesuffix("-ar") + "-nm"))
-    providers = {}
-    for name in names:
-        text = lc.run([nm, "-g", "--defined-only", objects / (name + ".o")]).stdout.decode()
-        for line in text.splitlines():
-            row = line.split()
-            if len(row) == 3 and row[1] in ("T", "D", "B", "R", "S", "C"):
-                providers.setdefault(row[2], []).append(name)
-    duplicates = {key: sorted(value) for key, value in providers.items() if len(value) > 1}
-    if duplicates != {"pthread_attr_setstacksize": ["pthread", "pthread_attr_setstacksize"]}:
-        raise Failure("unexpected pthread duplicate-provider inventory: " + str(duplicates))
-    for required in ("pthread_condattr_setclock", "pthread_condattr_getclock", "pthread_create", "pthread_cond_init", "pthread_cond_timedwait"):
-        if required not in providers:
-            raise Failure("matching pthread implementation lacks " + required)
-    record = dict(source=spec, duplicate_providers=duplicates, prelink_members=prelink_members, headers={n: lc.sha256_file(source / n) for n in ("pthread.h", "semaphore.h", "sched.h")},
-                  commands=commands, archive_sha256=lc.sha256_file(archive), members=names,
-                  sdk_archive_sha256=lc.sha256_file(Path(cfg["aros_sdk"]) / "lib/libpthread.a"),
-                  native_runtime="UNTESTED")
-    (dest / "manifest.json").write_text(json.dumps(record, indent=2) + "\n")
-    return archive, record
+def require_nix_mode(installation, native_build):
+    """The application's normalized paths require both std and CRT in -nix mode."""
+    if ("-nix" not in installation.get("cc_args", [])
+            or native_build.get("path_mode") != "nix"
+            or "--cfg=aros_nix_paths" not in native_build.get("std_rustflags", [])):
+        raise Failure("LightCraft requires a matching -nix SDK: rebuild std and the C driver with --cc-arg=-nix")
+
+
+def check_pthread_archive(archive, nm):
+    """Reject the old archive/new header mixture before invoking Cargo."""
+    if not archive.is_file():
+        raise Failure("missing SDK pthread archive: " + str(archive))
+    output = lc.run([nm, "-g", "--defined-only", archive]).stdout.decode()
+    defined = {line.split()[-1] for line in output.splitlines() if line.split()}
+    required = {"pthread_condattr_setclock", "pthread_condattr_getclock",
+                "pthread_create", "pthread_cond_init", "pthread_cond_timedwait"}
+    missing = required - defined
+    if missing:
+        raise Failure("SDK pthread archive lacks " + ", ".join(sorted(missing)) + "; rebuild the matching C SDK")
+    return {"path": str(archive), "sha256": lc.sha256_file(archive),
+            "required_symbols": sorted(required), "implementation": "qualified SDK static archive"}
+
+
+def application_features(args):
+    # The shipped AROS profile starts with the upstream CPU pipeline only.
+    flags = ["--no-default-features"]
+    if args.features:
+        flags += ["--features", args.features]
+    return flags
 
 
 def build(args, cfg):
@@ -113,6 +83,7 @@ def build(args, cfg):
     installation = read_installation(prefix)
     expected_cc = prefix / "bin" / installation["profile"]["driver"]
     native_build = json.loads((Path(installation["native_build"]) / "result.json").read_text())
+    require_nix_mode(installation, native_build)
     if Path(cfg["aros_gcc"]).resolve() != expected_cc.resolve():
         raise Failure("the C compiler must be the qualified installation driver")
     if Path(cfg["aros_sdk"]).resolve() != Path(native_build["sdk"]).resolve():
@@ -121,8 +92,6 @@ def build(args, cfg):
         if os.environ.get(name):
             raise Failure("clear " + name + ": it would override the qualified v1 profile")
     root = Path(cfg["build_root"])
-    if any(c.isspace() for c in str(root)):
-        raise Failure("use a v1 build_root without whitespace for Rust pre-link object arguments")
     root.mkdir(parents=True, exist_ok=True)
     src = root / "src"
     head, dirty = lc.work_state(lc.WORK)
@@ -145,11 +114,12 @@ def build(args, cfg):
     vendor.pop("parking_lot_core", None)
     for name, info in crates.items():
         vendor[name] = info["path"]
-    pthread_archive, pthread_record = build_pthread(cfg, root)
+    nm = str(Path(cfg["aros_ar"]).with_name(Path(cfg["aros_ar"]).name.removesuffix("-ar") + "-nm"))
+    pthread_record = check_pthread_archive(Path(cfg["aros_sdk"]) / "lib/libpthread.a", nm)
     command = [str(prefix / "bin/cargo"), "--config", str(prefix / "cargo-config.toml")]
     flags = ["-Lnative=" + str(Path(cfg["aros_sdk"]) / "lib"), '--cfg=aros_sdk_generation="' + installation["generation"] + '"',
              "-Cpanic=abort", "-Clink-arg=-nix",
-             "-Zpre-link-args=" + " ".join(str(pthread_archive.parent / "objects" / (name + ".o")) for name in pthread_record["prelink_members"]), '--cfg=getrandom_backend="custom"',
+             '--cfg=getrandom_backend="custom"',
              f"--remap-path-prefix={root}=/build", f"--remap-path-prefix={src}=/lightcraft",
              f"--remap-path-prefix={cfg['cargo_home']}=/cargo", f"--remap-path-prefix={installation['native_build']}=/rust"]
     command += ["--config", "target." + TRIPLE + ".rustflags=" + json.dumps(flags)]
@@ -172,10 +142,7 @@ def build(args, cfg):
     command += ["build", "--release", "--manifest-path", str(src / "Cargo.toml")]
     if not args.online:
         command.append("--offline")
-    if args.no_default_features:
-        command.append("--no-default-features")
-    if args.features:
-        command += ["--features", args.features]
+    command += application_features(args)
     packages = args.package or list(lc.PACKAGES)
     for name in packages:
         if name not in lc.PACKAGES:
