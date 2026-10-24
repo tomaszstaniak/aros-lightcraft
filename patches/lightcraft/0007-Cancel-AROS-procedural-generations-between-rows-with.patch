@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LightCraft AROS port <lightcraft-aros@invalid>
+Date: Sat, 24 Oct 2026 03:38:43 +0200
+Subject: [PATCH] Cancel AROS procedural generations between rows without
+ publishing partial pixels
+
+---
+ crates/engine/src/demo.rs  | 51 +++++++++++++++++++++++++++++++++++---
+ crates/scenes/src/lib.rs   | 34 +++++++++++++++++++++++++
+ crates/scenes/src/paint.rs | 24 ++++++++++++++----
+ 3 files changed, 101 insertions(+), 8 deletions(-)
+
+diff --git a/crates/engine/src/demo.rs b/crates/engine/src/demo.rs
+index 797d7520303e6c0ab257413fff5293cc76b18af8..8c7b5375d49004f948a0aa458758fe2bfdb62402 100644
+--- a/crates/engine/src/demo.rs
++++ b/crates/engine/src/demo.rs
+@@ -137,10 +137,22 @@ pub(crate) fn scene_pixels(scene: &lightcraft_scenes::Scene, max_edge: usize) ->
+             }
+         }
+     };
++    #[cfg(not(target_os = "aros"))]
+     let pixels = slot.get_or_generate(|how| match how {
+         Render::Parallel => scene.render_fit(max_edge),
+         Render::Serial => scene.render_fit_serial(max_edge),
+     });
++    #[cfg(target_os = "aros")]
++    let pixels = slot.get_or_generate_checked(|how| {
++        if max_edge >= scene.width.max(scene.height) as usize {
++            log::info!("demo full-resolution generation started: {}x{}", scene.width, scene.height);
++        }
++        scene.render_fit_cancellable(max_edge, matches!(how, Render::Parallel), &lightcraft_workers::closing)
++            .map_err(|_| {
++                log::info!("demo generation cancelled during shutdown");
++                "demo generation cancelled during shutdown".to_string()
++            })
++    });
+     trim_scene_cache(&mut scene_cache(), scene_cache_limit());
+     pixels
+ }
+@@ -164,7 +176,7 @@ const FAILED: &str = "the demo scene could not be generated";
+ /// scan's pace, `LIGHTCRAFT_FACE_THREADS`). Any other caller (the render workers, which are plain
+ /// threads) renders in parallel on [`render_pool`], whose threads only ever render, and blocks
+ /// without running other work meanwhile; where that pool can't be started it renders alone too.
+-fn generate(render: impl FnOnce(Render) -> lightcraft_raster::Rgb32f + Send) -> lightcraft_raster::Rgb32f {
++fn generate<T: Send>(render: impl FnOnce(Render) -> T + Send) -> T {
+     if rayon::current_thread_index().is_some() {
+         return render(Render::Serial);
+     }
+@@ -257,7 +269,12 @@ impl SceneSlot {
+     /// The pixels `render` makes ([`generate`]), generated once: the first caller renders, with no
+     /// lock held, and later ones wait for its outcome. A render that panics is an error for the
+     /// callers of its generation, and the next request tries again.
++    #[cfg(any(not(target_os = "aros"), test))]
+     fn get_or_generate(&self, render: impl FnOnce(Render) -> lightcraft_raster::Rgb32f + Send) -> Result<Arc<lightcraft_raster::Rgb32f>, String> {
++        self.get_or_generate_checked(|how| Ok(render(how)))
++    }
++
++    fn get_or_generate_checked(&self, render: impl FnOnce(Render) -> Result<lightcraft_raster::Rgb32f, String> + Send) -> Result<Arc<lightcraft_raster::Rgb32f>, String> {
+         let mut g = self.lock();
+         let n = match &g.generation {
+             Generation::Ready(p) => return Ok(p.clone()),
+@@ -279,8 +296,8 @@ impl SceneSlot {
+         let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generate(render)));
+         let mut g = self.lock();
+         g.generation = match made {
+-            Ok(pixels) => Generation::Ready(Arc::new(pixels)),
+-            Err(_) => Generation::Failed,
++            Ok(Ok(pixels)) => Generation::Ready(Arc::new(pixels)),
++            Ok(Err(_)) | Err(_) => Generation::Failed,
+         };
+         let outcome = g.outcome(n).unwrap_or_else(|| Err(FAILED.into()));
+         drop(g);
+@@ -344,6 +361,34 @@ fn trim_scene_cache(c: &mut SceneCache, limit: usize) {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn cancelled_result_wakes_waiters_and_is_not_cached() {
++        within(5, || {
++            let slot = std::sync::Arc::new(SceneSlot::default());
++            let (started_tx, started_rx) = std::sync::mpsc::channel();
++            let (finish_tx, finish_rx) = std::sync::mpsc::channel();
++            let generator = {
++                let slot = slot.clone();
++                std::thread::spawn(move || slot.get_or_generate_checked(move |_| {
++                    started_tx.send(()).unwrap();
++                    finish_rx.recv().unwrap();
++                    Err("cancelled".into())
++                }))
++            };
++            started_rx.recv().unwrap();
++            let waiter = {
++                let slot = slot.clone();
++                std::thread::spawn(move || slot.get_or_generate_checked(|_| Ok(pixels(9))))
++            };
++            until_waiting(&slot, 1);
++            finish_tx.send(()).unwrap();
++            assert!(generator.join().unwrap().is_err());
++            assert!(waiter.join().unwrap().is_err());
++            assert!(slot.ready().is_none());
++            assert!(slot.get_or_generate_checked(|_| Ok(pixels(3))).is_ok());
++        });
++    }
++
+     fn small_scene() -> lightcraft_scenes::Scene {
+         lightcraft_scenes::demo_library().swap_remove(0)
+     }
+diff --git a/crates/scenes/src/lib.rs b/crates/scenes/src/lib.rs
+index 11fd8685d9e84c042b90bebd837e686b33a19a3a..ea23c717f7681d3405f4b9a991994de35b0f2a26 100644
+--- a/crates/scenes/src/lib.rs
++++ b/crates/scenes/src/lib.rs
+@@ -15,6 +15,9 @@ use serde::Serialize;
+ 
+ pub use paint::render_srgb_linear;
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct RenderCancelled;
++
+ /// Kinds of scene the generator knows.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -80,6 +83,12 @@ impl Scene {
+         paint::render_serial(self.kind, self.seed, w, h)
+     }
+ 
++    /// Check cancellation before allocation and each row; partial pixels are never returned.
++    pub fn render_fit_cancellable(&self, max_edge: usize, parallel: bool, cancelled: &(impl Fn() -> bool + Sync)) -> Result<Rgb32f, RenderCancelled> {
++        let (w, h) = self.fit(max_edge);
++        paint::render_cancellable(self.kind, self.seed, w, h, parallel, cancelled)
++    }
++
+     fn fit(&self, max_edge: usize) -> (usize, usize) {
+         // never past the scene's own size: that is a demo photo's full resolution, and a size
+         // from a damaged catalog (a width of 4294967295) asked for more memory than exists
+@@ -252,3 +261,28 @@ mod tests {
+         assert!(err < 0.08, "{err}");
+     }
+ }
++
++#[cfg(test)]
++mod cancel_tests {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    #[test]
++    fn cancelled_generation_returns_error_instead_of_partial_pixels() {
++        let scene = demo_library().remove(0);
++        for parallel in [false, true] {
++            let rows = AtomicUsize::new(0);
++            let result = scene.render_fit_cancellable(32, parallel, &|| rows.fetch_add(1, Ordering::Relaxed) >= 3);
++            assert!(result.is_err());
++            assert!(rows.load(Ordering::Relaxed) >= 4);
++        }
++    }
++    #[test]
++    fn uncancelled_generation_preserves_upstream_pixels() {
++        let scene = demo_library().remove(0);
++        let expected = scene.render_fit(32);
++        for parallel in [false, true] {
++            let result = scene.render_fit_cancellable(32, parallel, &|| false);
++            assert!(matches!(result, Ok(ref image) if image.data == expected.data));
++        }
++    }
++}
+diff --git a/crates/scenes/src/paint.rs b/crates/scenes/src/paint.rs
+index 4f3c4560be017abf04410367f956722c65dc6e2e..a89546762d5140b3be4f15e686206fab75448912 100644
+--- a/crates/scenes/src/paint.rs
++++ b/crates/scenes/src/paint.rs
+@@ -207,15 +207,28 @@ pub fn render_serial(kind: Kind, seed: u32, w: usize, h: usize) -> Rgb32f {
+ }
+ 
+ fn render_rows(kind: Kind, seed: u32, w: usize, h: usize, parallel: bool) -> Rgb32f {
++    match render_rows_checked(kind, seed, w, h, parallel, &|| Ok::<(), std::convert::Infallible>(())) {
++        Ok(image) => image,
++        Err(never) => match never {},
++    }
++}
++
++pub(crate) fn render_cancellable(kind: Kind, seed: u32, w: usize, h: usize, parallel: bool, cancelled: &(impl Fn() -> bool + Sync)) -> Result<Rgb32f, crate::RenderCancelled> {
++    render_rows_checked(kind, seed, w, h, parallel, &|| if cancelled() { Err(crate::RenderCancelled) } else { Ok(()) })
++}
++
++fn render_rows_checked<E: Send>(kind: Kind, seed: u32, w: usize, h: usize, parallel: bool, check: &(impl Fn() -> Result<(), E> + Sync)) -> Result<Rgb32f, E> {
++    check()?;
+     let mut img = Rgb32f::new(w, h);
+     if w == 0 || h == 0 {
+-        return img;
++        return Ok(img);
+     }
+     let aspect = w as f32 / h as f32;
+     let p = P { seed, aspect };
+     let ss = if w * h <= 300_000 { 2 } else { 1 };
+     let to2020 = SRGB.to_space(&REC2020).to_f32();
+-    let paint = |(y, row): (usize, &mut [[f32; 3]])| {
++    let paint = |(y, row): (usize, &mut [[f32; 3]])| -> Result<(), E> {
++        check()?;
+         for (xi, px) in row.iter_mut().enumerate() {
+             let mut acc = [0.0f32; 3];
+             for sy in 0..ss {
+@@ -233,13 +246,14 @@ fn render_rows(kind: Kind, seed: u32, w: usize, h: usize, parallel: bool) -> Rgb
+                 (m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2]).max(0.0),
+             ];
+         }
++        Ok(())
+     };
+     if parallel {
+-        img.data.par_chunks_mut(w).enumerate().for_each(paint);
++        img.data.par_chunks_mut(w).enumerate().try_for_each(paint)?;
+     } else {
+-        img.data.chunks_mut(w).enumerate().for_each(paint);
++        img.data.chunks_mut(w).enumerate().try_for_each(paint)?;
+     }
+-    img
++    Ok(img)
+ }
+ 
+ /// Linear sRGB variant (for tests/tools that don't want Rec.2020).

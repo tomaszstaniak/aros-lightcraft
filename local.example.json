@@ -1,0 +1,13 @@
+{
+  "aros_gcc": "/path/to/aros_gcc",
+  "aros_ar": "/path/to/aros_ar",
+  "aros_strip": "/path/to/aros_strip",
+  "aros_sdk": "/path/to/aros_sdk",
+  "rust_aros": "/path/to/rust_aros",
+  "toolchain": "aros-net-20261016",
+  "aros_src": "/path/to/aros_src",
+  "egui_aros": "/path/to/egui_aros",
+  "egui_upstream_root": "/path/to/egui-aros/upstream",
+  "rust_aros_commit": "7b00bb2aab0622788e60601f39f5cf79b63c3509",
+  "aros_src_commit": "5376f09bc1ed0c36a12fbb096406013f8a046e89"
+}

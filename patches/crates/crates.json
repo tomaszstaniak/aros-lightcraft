@@ -1,0 +1,38 @@
+{
+  "comment": "crates.io crates built from a patched copy. checksum: the Cargo.lock checksum of the registry archive; tree_sha256: scripts/pc.py tree hash of the patched copy, recorded after review.",
+  "crates": [
+    {
+      "name": "rayon-core",
+      "version": "1.13.0",
+      "checksum": "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91",
+      "tree_sha256": "edf8afea24379d2b2b21f83d9e8666a8298b9855d97f58bfeb3555350a6c8200"
+    },
+    {
+      "name": "parking_lot_core",
+      "version": "0.9.12",
+      "checksum": "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1",
+      "tree_sha256": "ff637e8e25c844311983b6ee38b381681298d1004fd5c7bab5680e1fbff6481a"
+    },
+    {
+      "name": "getrandom",
+      "version": "0.2.17",
+      "patch_key": "getrandom02",
+      "checksum": "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0",
+      "tree_sha256": "52f2c3460c6a90e860ab471469525849d1e62cff238f4d14f77d8455345017b9"
+    },
+    {
+      "name": "getrandom",
+      "version": "0.3.4",
+      "patch_key": "getrandom03",
+      "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd",
+      "tree_sha256": "3395405d03a5f8dd0c51aaf15eabe5826e9bb365aebdc456da59430ad567fdb1"
+    },
+    {
+      "name": "getrandom",
+      "version": "0.4.3",
+      "patch_key": "getrandom04",
+      "checksum": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
+      "tree_sha256": "7851287bb0905e2a7e3faa4b8486d26e726ddcbdb9b3de592930cefb2cfdc9f7"
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+--- a/csrc/compat.c
++++ b/csrc/compat.c
+@@ -32,6 +32,18 @@
+ #include <proto/exec.h>
+ #include <arpa/inet.h>
+ 
++/* The selected v11 CRT shares its path-conversion buffer and descriptor array.
++ * open/close explicitly exclude threaded use. Serialize Rust's filesystem entry
++ * points (including descriptor allocation), preserving errno across unlocking.
++ * Blocking reads/writes do not hold this gate; callers synchronize shared files. */
++static pthread_mutex_t rs_fs_mutex = PTHREAD_MUTEX_INITIALIZER;
++#define RS_FS(type, bad, call) do { \
++    int lock_error = pthread_mutex_lock(&rs_fs_mutex); \
++    if (lock_error) { errno = lock_error; return (bad); } \
++    type result = (call); int saved_error = errno; \
++    pthread_mutex_unlock(&rs_fs_mutex); errno = saved_error; return result; \
++} while (0)
++
+ #define AT_FDCWD_AROS (-100)
+ #define ENOSYS_RET  do { errno = ENOSYS; return -1; } while (0)
+ 
+@@ -146,13 +158,13 @@
+ }
+ 
+ /* Rust bindings call these dispatchers; C SDK file calls remain untouched. */
+-int rs_fd_close(int fd) { return rs_socket_tagged(fd) ? rs_closesocket(fd) : close(fd); }
++int rs_fd_close(int fd) { if (rs_socket_tagged(fd)) return rs_closesocket(fd); RS_FS(int, -1, close(fd)); }
+ long rs_fd_read(int fd, void *b, size_t n) { return rs_socket_tagged(fd) ? rs_recv(fd, b, n, 0) : read(fd, b, n); }
+ long rs_fd_write(int fd, const void *b, size_t n) { return rs_socket_tagged(fd) ? rs_send(fd, b, n, 0) : write(fd, b, n); }
+ int rs_fd_ioctl(int fd, unsigned long request, ...) {
+     if ((uint32_t)request == (uint32_t)FIOCLEX || (uint32_t)request == (uint32_t)FIONCLEX) {
+         int flags = (uint32_t)request == (uint32_t)FIOCLEX ? FD_CLOEXEC : 0;
+-        if (!rs_socket_tagged(fd)) return fcntl(fd, F_SETFD, flags);
++        if (!rs_socket_tagged(fd)) { RS_FS(int, -1, fcntl(fd, F_SETFD, flags)); }
+         SOCKET_FD(fd); rs_socket_slots[raw].fdflags = flags; return 0;
+     }
+     /* Other zero-sized requests have no supported contract here. Do not read
+@@ -176,8 +188,8 @@
+         va_list ap; va_start(ap, cmd); arg = va_arg(ap, int); va_end(ap);
+     }
+     if (!rs_socket_tagged(fd)) {
+-        if (cmd == F_GETFD || cmd == F_GETFL) return fcntl(fd, cmd);
+-        return fcntl(fd, cmd, arg);
++        if (cmd == F_GETFD || cmd == F_GETFL) { RS_FS(int, -1, fcntl(fd, cmd)); }
++        RS_FS(int, -1, fcntl(fd, cmd, arg));
+     }
+     SOCKET_FD(fd);
+     switch (cmd) {
+@@ -195,11 +207,11 @@
+     }
+ }
+ int rs_fd_dup(int fd) {
+-    if (!rs_socket_tagged(fd)) return dup(fd);
++    if (!rs_socket_tagged(fd)) { RS_FS(int, -1, dup(fd)); }
+     errno = ENOTSUP; return -1;
+ }
+ int rs_fd_dup2(int fd, int target) {
+-    if (!rs_socket_tagged(fd) && !rs_socket_tagged(target)) return dup2(fd, target);
++    if (!rs_socket_tagged(fd) && !rs_socket_tagged(target)) { RS_FS(int, -1, dup2(fd, target)); }
+     errno = ENOTSUP; return -1;
+ }
+ /* This bsdsocket.library has no getaddrinfo; resolve IPv4 names with
+@@ -413,3 +425,38 @@
+ }
+ 
+ #include "selector_aros.inc"
++
++/* Names are distinct from CRT symbols: internal CRT calls cannot re-enter this gate. */
++int rs_fs_open(const char *p, int flags, ...) {
++    mode_t mode = 0;
++    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
++    RS_FS(int, -1, open(p, flags, mode));
++}
++int rs_fs_stat(const char *p, struct stat *s) { RS_FS(int, -1, stat(p,s)); }
++int rs_fs_lstat(const char *p, struct stat *s) { RS_FS(int, -1, lstat(p,s)); }
++int rs_fs_mkdir(const char *p, mode_t m) { RS_FS(int, -1, mkdir(p,m)); }
++int rs_fs_rmdir(const char *p) { RS_FS(int, -1, rmdir(p)); }
++int rs_fs_unlink(const char *p) { RS_FS(int, -1, unlink(p)); }
++int rs_fs_rename(const char *a, const char *b) { RS_FS(int, -1, rename(a,b)); }
++int rs_fs_link(const char *a, const char *b) { RS_FS(int, -1, link(a,b)); }
++int rs_fs_symlink(const char *a, const char *b) { RS_FS(int, -1, symlink(a,b)); }
++ssize_t rs_fs_readlink(const char *p, char *b, size_t n) { RS_FS(ssize_t, -1, readlink(p,b,n)); }
++char *rs_fs_realpath(const char *p, char *b) { RS_FS(char *, NULL, realpath(p,b)); }
++int rs_fs_chdir(const char *p) { RS_FS(int, -1, chdir(p)); }
++char *rs_fs_getcwd(char *b, size_t n) { RS_FS(char *, NULL, getcwd(b,n)); }
++DIR *rs_fs_opendir(const char *p) { RS_FS(DIR *, NULL, opendir(p)); }
++int rs_fs_closedir(DIR *d) { RS_FS(int, -1, closedir(d)); }
++int rs_fs_pipe(int p[2]) { RS_FS(int, -1, pipe(p)); }
++int rs_fs_chown(const char *p, uid_t u, gid_t g) { RS_FS(int, -1, chown(p,u,g)); }
++int rs_fs_lchown(const char *p, uid_t u, gid_t g) { RS_FS(int, -1, lchown(p,u,g)); }
++int rs_fs_chmod(const char *p, mode_t m) { RS_FS(int, -1, chmod(p,m)); }
++int rs_fs_openat(int fd, const char *p, int flags, ...) {
++    mode_t mode = 0;
++    if (flags & O_CREAT) { va_list ap; va_start(ap, flags); mode = (mode_t)va_arg(ap, int); va_end(ap); }
++    RS_FS(int, -1, openat(fd,p,flags,mode));
++}
++int rs_fs_mkdirat(int fd, const char *p, mode_t m) { RS_FS(int, -1, mkdirat(fd,p,m)); }
++int rs_fs_unlinkat(int fd, const char *p, int f) { RS_FS(int, -1, unlinkat(fd,p,f)); }
++int rs_fs_linkat(int a, const char *p, int b, const char *q, int f) { RS_FS(int, -1, linkat(a,p,b,q,f)); }
++int rs_fs_renameat(int a, const char *p, int b, const char *q) { RS_FS(int, -1, renameat(a,p,b,q)); }
++int rs_fs_fstatat(int fd, const char *p, struct stat *s, int f) { RS_FS(int, -1, fstatat(fd,p,s,f)); }
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -289,7 +289,7 @@
+ extern "C" {
+     /// AROS' C library exports this only under an internal name: the plain
+     /// `open` symbol belongs to exec.library and is a different function.
+-    #[link_name = "__open_CrtBase_wrapper"]
++    #[link_name = "rs_fs_open"]
+     pub fn open(path: *const c_char, oflag: c_int, ...) -> c_int;
+     #[link_name = "rs_fd_close"]
+     pub fn close(fd: c_int) -> c_int;
+@@ -302,25 +302,40 @@
+     pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+     #[link_name = "rs_fd_dup2"]
+     pub fn dup2(old: c_int, new: c_int) -> c_int;
++    #[link_name = "rs_fs_pipe"]
+     pub fn pipe(fds: *mut c_int) -> c_int;
+     pub fn isatty(fd: c_int) -> c_int;
+     pub fn ftruncate(fd: c_int, length: off_t) -> c_int;
+     pub fn fsync(fd: c_int) -> c_int;
++    #[link_name = "rs_fs_stat"]
+     pub fn stat(path: *const c_char, buf: *mut stat) -> c_int;
+     pub fn fstat(fd: c_int, buf: *mut stat) -> c_int;
++    #[link_name = "rs_fs_lstat"]
+     pub fn lstat(path: *const c_char, buf: *mut stat) -> c_int;
++    #[link_name = "rs_fs_mkdir"]
+     pub fn mkdir(path: *const c_char, mode: mode_t) -> c_int;
++    #[link_name = "rs_fs_rmdir"]
+     pub fn rmdir(path: *const c_char) -> c_int;
++    #[link_name = "rs_fs_unlink"]
+     pub fn unlink(path: *const c_char) -> c_int;
++    #[link_name = "rs_fs_rename"]
+     pub fn rename(old: *const c_char, new: *const c_char) -> c_int;
++    #[link_name = "rs_fs_link"]
+     pub fn link(old: *const c_char, new: *const c_char) -> c_int;
++    #[link_name = "rs_fs_symlink"]
+     pub fn symlink(target: *const c_char, linkpath: *const c_char) -> c_int;
++    #[link_name = "rs_fs_readlink"]
+     pub fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: size_t) -> ssize_t;
++    #[link_name = "rs_fs_realpath"]
+     pub fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
++    #[link_name = "rs_fs_chdir"]
+     pub fn chdir(path: *const c_char) -> c_int;
++    #[link_name = "rs_fs_getcwd"]
+     pub fn getcwd(buf: *mut c_char, size: size_t) -> *mut c_char;
++    #[link_name = "rs_fs_opendir"]
+     pub fn opendir(name: *const c_char) -> *mut DIR;
+     pub fn readdir(dirp: *mut DIR) -> *mut dirent;
++    #[link_name = "rs_fs_closedir"]
+     pub fn closedir(dirp: *mut DIR) -> c_int;
+     pub fn getenv(name: *const c_char) -> *mut c_char;
+     pub fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
+@@ -558,8 +573,10 @@
+ 
+ // --- functions present in the SDK (second batch) ------------------------
+ extern "C" {
++    #[link_name = "rs_fs_chmod"]
+     pub fn chmod(path: *const c_char, mode: mode_t) -> c_int;
+     pub fn fchmod(fd: c_int, mode: mode_t) -> c_int;
++    #[link_name = "rs_fs_chown"]
+     pub fn chown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int;
+     pub fn fchown(fd: c_int, uid: uid_t, gid: gid_t) -> c_int;
+     #[link_name = "rs_fd_dup"]
+@@ -635,11 +652,17 @@
+     #[link_name = "rs_gethostname"] pub fn gethostname(name: *mut c_char, len: size_t) -> c_int;
+     pub fn gai_strerror(err: c_int) -> *const c_char;
+     pub fn socketpair(d: c_int, t: c_int, p: c_int, sv: *mut c_int) -> c_int;
++    #[link_name = "rs_fs_openat"]
+     pub fn openat(fd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
++    #[link_name = "rs_fs_mkdirat"]
+     pub fn mkdirat(fd: c_int, path: *const c_char, mode: mode_t) -> c_int;
++    #[link_name = "rs_fs_unlinkat"]
+     pub fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
++    #[link_name = "rs_fs_linkat"]
+     pub fn linkat(f1: c_int, a: *const c_char, f2: c_int, b: *const c_char, fl: c_int) -> c_int;
++    #[link_name = "rs_fs_renameat"]
+     pub fn renameat(f1: c_int, a: *const c_char, f2: c_int, b: *const c_char) -> c_int;
++    #[link_name = "rs_fs_fstatat"]
+     pub fn fstatat(fd: c_int, path: *const c_char, st: *mut stat, fl: c_int) -> c_int;
+     pub fn utimensat(fd: c_int, path: *const c_char, ts: *const timespec, fl: c_int) -> c_int;
+     pub fn futimens(fd: c_int, ts: *const timespec) -> c_int;
+@@ -653,6 +676,7 @@
+     pub fn killpg(pg: pid_t, sig: c_int) -> c_int;
+     pub fn setpgid(a: pid_t, b: pid_t) -> c_int;
+     pub fn setgroups(n: c_int, g: *const gid_t) -> c_int;
++    #[link_name = "rs_fs_lchown"]
+     pub fn lchown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int;
+     pub fn getpwuid_r(uid: uid_t, pw: *mut passwd, buf: *mut c_char, n: size_t, res: *mut *mut passwd) -> c_int;
+     pub fn poll(fds: *mut pollfd, n: nfds_t, timeout: c_int) -> c_int;

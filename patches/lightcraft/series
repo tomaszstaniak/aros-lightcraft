@@ -1,0 +1,7 @@
+0001-AROS-add-native-CPU-frontend-and-independent-launch-.patch
+0002-AROS-quiesce-CPU-workers-and-retire-cached-pools-bef.patch
+0003-Diagnose-catalog-IO-and-drain-AROS-workers-before-ex.patch
+0004-Wire-AROS-export-folder-requester-and-normalize-type.patch
+0005-Separate-native-export-fields-from-engine-paths-and-.patch
+0006-Propagate-native-export-field-errors-through-menu-co.patch
+0007-Cancel-AROS-procedural-generations-between-rows-with.patch

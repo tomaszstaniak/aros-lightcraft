@@ -1,0 +1,1818 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:49:51 +0200
+Subject: [PATCH] AROS: add native CPU frontend and independent launch
+ rendering policy
+
+Make native GPU dependencies optional and retain the upstream CPU image pipeline. Keep the desktop GPU feature explicit while the AROS build excludes wgpu. Enforce a process CPU policy that preferences and legacy GPU environment variables cannot undo.
+
+Add a small LightcraftApp/Services adapter using egui-aros, persistent settings/catalog, ASL and upstream shutdown. Isolate Workbench/ToolTypes, DOS locks and path conversion in a safe platform boundary; copy system-owned icon data before freeing it. Select -nix explicitly and preserve the main task directory before workers. Use one launch parser for CLI and ToolTypes with independent CPU/AUTO/GPU requests.
+
+---
+ Cargo.toml                              |   4 +-
+ apps/lightcraft-aros/Cargo.toml         |  24 ++
+ apps/lightcraft-aros/src/main.rs        |  13 +
+ apps/lightcraft-aros/src/native.rs      | 385 ++++++++++++++++++++++++
+ apps/lightcraft-cli/Cargo.toml          |   8 +-
+ apps/lightcraft-cli/src/main.rs         |  90 +++++-
+ apps/lightcraft/Cargo.toml              |   2 +-
+ crates/aros-platform/Cargo.toml         |   7 +
+ crates/aros-platform/build.rs           |  31 ++
+ crates/aros-platform/c/platform.c       |  67 +++++
+ crates/aros-platform/src/lib.rs         | 164 ++++++++++
+ crates/catalog/Cargo.toml               |   3 +
+ crates/catalog/src/lock.rs              |  73 +++--
+ crates/engine/Cargo.toml                |   2 +
+ crates/engine/src/cmd/face_detect.rs    |  64 ++--
+ crates/engine/src/cmd/face_recognize.rs |   7 +-
+ crates/engine/src/denoise.rs            |   8 +-
+ crates/engine/src/faces_worker.rs       |   1 +
+ crates/gpu/Cargo.toml                   |   9 +-
+ crates/gpu/src/lib.rs                   | 129 ++++----
+ crates/launch-config/Cargo.toml         |   7 +
+ crates/launch-config/src/lib.rs         | 158 ++++++++++
+ 23 files changed, 1143 insertions(+), 116 deletions(-)
+ create mode 100644 apps/lightcraft-aros/Cargo.toml
+ create mode 100644 apps/lightcraft-aros/src/main.rs
+ create mode 100644 apps/lightcraft-aros/src/native.rs
+ create mode 100644 crates/aros-platform/Cargo.toml
+ create mode 100644 crates/aros-platform/build.rs
+ create mode 100644 crates/aros-platform/c/platform.c
+ create mode 100644 crates/aros-platform/src/lib.rs
+ create mode 100644 crates/launch-config/Cargo.toml
+ create mode 100644 crates/launch-config/src/lib.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index ef204030ff1eb0c051bbe9b53dafd4af70c247c2..995f15d06f294fc09dee1110f2cfd5595cf90225 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -29,11 +29,11 @@ lightcraft-lensdb = { path = "crates/lensdb" }
+ lightcraft-inpaint = { path = "crates/inpaint" }
+ lightcraft-scenes = { path = "crates/scenes" }
+ lightcraft-pipeline = { path = "crates/pipeline" }
+-lightcraft-gpu = { path = "crates/gpu" }
++lightcraft-gpu = { path = "crates/gpu", default-features = false }
+ lightcraft-catalog = { path = "crates/catalog" }
+ lightcraft-preview = { path = "crates/preview" }
+ lightcraft-merge = { path = "crates/merge" }
+-lightcraft-engine = { path = "crates/engine" }
++lightcraft-engine = { path = "crates/engine", default-features = false }
+ lightcraft-ui-egui = { path = "crates/ui-egui" }
+ lightcraft-mcp = { path = "crates/mcp" }
+ lightcraft-fetch = { path = "crates/fetch" }
+diff --git a/apps/lightcraft-aros/Cargo.toml b/apps/lightcraft-aros/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..93f09d9188514dea56f0a965b6e43b0d9c293ee8
+--- /dev/null
++++ b/apps/lightcraft-aros/Cargo.toml
+@@ -0,0 +1,24 @@
++[package]
++name = "lightcraft-aros"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++[lints]
++workspace = true
++[[bin]]
++name = "LightCraft"
++path = "src/main.rs"
++[dependencies]
++lightcraft-launch-config = { path = "../../crates/launch-config" }
++lightcraft-aros-platform = { path = "../../crates/aros-platform" }
++[target.'cfg(target_os = "aros")'.dependencies]
++lightcraft-engine = { workspace = true }
++lightcraft-ui-egui = { workspace = true }
++lightcraft-codecs = { workspace = true }
++lightcraft-raster = { workspace = true }
++egui = { workspace = true }
++egui-aros = { version = "0.1", features = ["asl"] }
++serde_json = { workspace = true }
++log = { workspace = true }
++rayon-core = "=1.13.0"
+diff --git a/apps/lightcraft-aros/src/main.rs b/apps/lightcraft-aros/src/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..05ab6c0c509b48faf80f00c9095807a2e2ed540c
+--- /dev/null
++++ b/apps/lightcraft-aros/src/main.rs
+@@ -0,0 +1,13 @@
++//! LightCraft AROS host: upstream app/services, shared egui-aros CPU window and input.
++#![forbid(unsafe_code)]
++#[cfg(target_os = "aros")]
++mod native;
++fn main() -> std::process::ExitCode {
++    #[cfg(target_os = "aros")]
++    return native::main();
++    #[cfg(not(target_os = "aros"))]
++    {
++        eprintln!("LightCraft AROS requires x86_64 AROS ABIv11");
++        std::process::ExitCode::FAILURE
++    }
++}
+diff --git a/apps/lightcraft-aros/src/native.rs b/apps/lightcraft-aros/src/native.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..abc8aefe8d84b684916553bcbd9690bebfd1e5c1
+--- /dev/null
++++ b/apps/lightcraft-aros/src/native.rs
+@@ -0,0 +1,385 @@
++use lightcraft_aros_platform as platform;
++use lightcraft_launch_config::{Capabilities, Request};
++use lightcraft_ui_egui::{LightcraftApp, Services};
++use serde_json::{Value, json};
++use std::{
++    cell::RefCell,
++    collections::VecDeque,
++    io::Write,
++    path::PathBuf,
++    rc::Rc,
++    sync::{Mutex, mpsc},
++    time::{Duration, Instant},
++};
++
++struct Logger;
++static LOGGER: Logger = Logger;
++static LOG: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
++fn line(text: &str) {
++    eprintln!("{text}");
++    if let Some(file) = LOG.get_or_init(|| {
++        let path = std::env::var("LIGHTCRAFT_LOG_FILE").unwrap_or_else(|_| "PROGDIR:LightCraft.log".into());
++        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
++    }) {
++        let mut f = file.lock().unwrap_or_else(|p| p.into_inner());
++        let _ = writeln!(f, "{text}");
++        let _ = f.flush();
++    }
++}
++impl log::Log for Logger {
++    fn enabled(&self, m: &log::Metadata) -> bool {
++        m.level() <= log::Level::Info
++    }
++    fn log(&self, r: &log::Record) {
++        if self.enabled(r.metadata()) {
++            line(&format!("{} {}: {}", r.level(), r.target(), r.args()));
++        }
++    }
++    fn flush(&self) {}
++}
++fn error(message: &str, workbench: bool) {
++    line(&format!("ERROR: {message}"));
++    if workbench {
++        platform::show_error(message);
++    }
++}
++fn normalized(name: &str) -> Result<String, String> {
++    platform::absolute(name)?.into_os_string().into_string().map_err(|_| "path is not UTF-8".into())
++}
++
++struct Options {
++    files: Vec<String>,
++    library: Option<String>,
++    script: Option<String>,
++    report: Option<String>,
++    screenshot: Option<String>,
++    frames: Option<u64>,
++    demo: bool,
++}
++fn options(args: Vec<String>, files: Vec<String>) -> Result<Options, String> {
++    let mut o = Options { files, library: None, script: None, report: None, screenshot: None, frames: None, demo: false };
++    let mut a = args.into_iter();
++    while let Some(arg) = a.next() {
++        match arg.as_str() {
++            "--demo" => o.demo = true,
++            "--library" | "--script" | "--report" | "--screenshot" => {
++                let path = normalized(&a.next().ok_or_else(|| format!("{arg}: missing path"))?)?;
++                match arg.as_str() {
++                    "--library" => o.library = Some(path),
++                    "--script" => o.script = Some(path),
++                    "--report" => o.report = Some(path),
++                    _ => o.screenshot = Some(path),
++                }
++            }
++            "--frames" => {
++                let s = a.next().ok_or("--frames: missing count")?;
++                o.frames = Some(s.parse().map_err(|_| "--frames: invalid count")?);
++            }
++            "--" => {
++                for p in a {
++                    o.files.push(normalized(&p)?);
++                }
++                break;
++            }
++            _ if arg.starts_with('-') => return Err(format!("unknown option `{arg}`; see --help")),
++            _ => o.files.push(normalized(&arg)?),
++        }
++    }
++    Ok(o)
++}
++
++pub fn main() -> std::process::ExitCode {
++    // Exact -nix link mode: main owns the CRT directory restore before any worker can chdir.
++    if let Err(e) = std::env::set_current_dir(".") {
++        error(&format!("cannot preserve startup directory: {e}"), true);
++        return std::process::ExitCode::from(20);
++    }
++    if log::set_logger(&LOGGER).is_ok() {
++        log::set_max_level(log::LevelFilter::Info);
++    }
++    std::panic::set_hook(Box::new(|p| line(&format!("PANIC: {p}"))));
++    let startup = match platform::startup() {
++        Ok(s) => s,
++        Err(e) => {
++            error(&e, true);
++            return std::process::ExitCode::from(2);
++        }
++    };
++    let args: Vec<String> = if startup.workbench { Vec::new() } else { std::env::args().skip(1).collect() };
++    if args.iter().any(|a| a == "--help" || a == "-h") {
++        println!(
++            "LightCraft 0.13.0 AROS x86_64 ABIv11\nUsage: LightCraft [OPTIONS] [FILES...]\n  --library DRAWER   persistent catalog (default: PROGDIR:LightCraftData/Library)\n  --demo             procedural demo library\n  --script FILE      sequential JSON-lines control requests\n  --report FILE      script replies (JSON lines)\n  --frames N         close after N frames (diagnostics)\n  --screenshot FILE  capture final CPU window frame\n{}",
++            lightcraft_launch_config::HELP
++        );
++        return std::process::ExitCode::SUCCESS;
++    }
++    if args.iter().any(|a| a == "--version") {
++        println!("LightCraft 0.13.0 AROS x86_64 ABIv11");
++        return std::process::ExitCode::SUCCESS;
++    }
++    let (request, args) = match Request::parse(&args, &startup.tooltypes) {
++        Ok(v) => v,
++        Err(e) => {
++            error(&e, startup.workbench);
++            return std::process::ExitCode::from(2);
++        }
++    };
++    line(&format!(
++        "launch: workbench={} GUI_RENDERER requested={} IMAGE_COMPUTE requested={}",
++        startup.workbench,
++        request.gui.name(),
++        request.image.name()
++    ));
++    for key in ["LIGHTCRAFT_GPU", "LIGHTCRAFT_GPU_BACKEND", "WGPU_BACKEND"] {
++        if let Ok(v) = std::env::var(key) {
++            line(&format!("legacy environment {key}={v}; cannot override the launch CPU policy"));
++        }
++    }
++    let modes = match request.resolve(Capabilities { gui_gpu: false, image_gpu: false }) {
++        Ok(m) => m,
++        Err(e) => {
++            line(&format!(
++                "GUI_RENDERER: requested={} actual=NOT_STARTED; IMAGE_COMPUTE: requested={} actual=NOT_STARTED; startup aborted: {e}",
++                request.gui.name(),
++                request.image.name()
++            ));
++            error(&e, startup.workbench);
++            return std::process::ExitCode::from(2);
++        }
++    };
++    for (name, mode) in [("GUI_RENDERER", modes.gui), ("IMAGE_COMPUTE", modes.image)] {
++        line(&format!(
++            "{name}: requested={} actual={}{}",
++            mode.requested.name(),
++            mode.actual.name(),
++            mode.reason.map(|r| format!("; {r}")).unwrap_or_default()
++        ));
++    }
++    lightcraft_engine::gpu::require_cpu();
++    let opts = match options(args, startup.files) {
++        Ok(o) => o,
++        Err(e) => {
++            error(&e, startup.workbench);
++            return std::process::ExitCode::from(2);
++        }
++    };
++    let result = run(opts);
++    // All app/session scopes have dropped before ending the global pool.
++    rayon_core::terminate_global_thread_pool();
++    match result {
++        Ok(()) => {
++            line("shutdown: complete");
++            std::process::ExitCode::SUCCESS
++        }
++        Err(e) => {
++            error(&e, startup.workbench);
++            std::process::ExitCode::FAILURE
++        }
++    }
++}
++
++type SharedWindow = Rc<RefCell<Option<egui_aros::WindowHandle>>>;
++fn services(window: SharedWindow, drawer: Rc<RefCell<String>>) -> Services {
++    let pick_window = window.clone();
++    let pick_dir = drawer.clone();
++    Services {
++        picker: Some(Box::new(move |req| {
++            use lightcraft_ui_egui::pick::PickKind;
++            let window = pick_window.borrow().clone().ok_or("window is not open")?;
++            let kind = match req.kind {
++                PickKind::Files => egui_aros::asl::Select::OpenMany,
++                PickKind::File => egui_aros::asl::Select::Open,
++                PickKind::Folder => egui_aros::asl::Select::Drawer,
++                PickKind::Save => egui_aros::asl::Select::Save,
++            };
++            let paths = egui_aros::asl::request(
++                &window,
++                kind,
++                req.title.as_deref().unwrap_or("LightCraft"),
++                &pick_dir.borrow(),
++                req.file_name.as_deref().unwrap_or(""),
++                "",
++            );
++            let paths = paths.into_iter().map(|p| normalized(&p)).collect::<Result<Vec<_>, _>>()?;
++            let (tx, rx) = mpsc::channel();
++            let _ = tx.send(paths);
++            Ok(rx)
++        })),
++        write: Some(Box::new(|p, b| std::fs::write(p, b).map_err(|e| format!("{p}: {e}")))),
++        write_shared: Some(std::sync::Arc::new(|p, b| std::fs::write(p, b).map_err(|e| format!("{p}: {e}")))),
++        png: Some(Box::new(|img| {
++            lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &Default::default()).unwrap_or_default()
++        })),
++        open_url: Some(Box::new(|u| if egui_aros::open_url(u) { Ok(()) } else { Err("OpenURL failed".into()) })),
++        log_file: Some("PROGDIR:LightCraft.log".into()),
++        ..Services::default()
++    }
++}
++struct Host {
++    app: LightcraftApp,
++    window: SharedWindow,
++    drawer: Rc<RefCell<String>>,
++    start: Instant,
++    frames: Option<u64>,
++    screenshot: Option<String>,
++    captured: bool,
++    script: VecDeque<Value>,
++    sender: mpsc::Sender<lightcraft_ui_egui::ControlRequest>,
++    reply: Option<mpsc::Receiver<Value>>,
++    report: Option<std::fs::File>,
++    failed: bool,
++}
++impl egui_aros::App for Host {
++    fn started(&mut self, w: egui_aros::WindowHandle) {
++        *self.window.borrow_mut() = Some(w);
++    }
++    fn logic(&mut self, ctx: &egui::Context) {
++        self.app.ui.settings.gpu = false;
++        self.app.logic(ctx);
++        if let Some(id) = self.app.session.active() {
++            if let Some(photo) = self.app.session.catalog.photo(id) {
++                if let lightcraft_engine::catalog::Source::File { path, .. } = &photo.source {
++                    if let Some(parent) = std::path::Path::new(path).parent().and_then(|p| p.to_str()) {
++                        if let Ok(d) = platform::nix_to_dos(parent) {
++                            *self.drawer.borrow_mut() = d;
++                        }
++                    }
++                }
++            }
++        }
++        if let Some(rx) = &self.reply {
++            if let Ok(v) = rx.try_recv() {
++                self.failed |= v.get("ok") == Some(&Value::Bool(false));
++                if let Some(f) = &mut self.report {
++                    let _ = writeln!(f, "{v}");
++                    let _ = f.flush();
++                }
++                line(&format!("control: {v}"));
++                self.reply = None;
++            }
++        }
++        if self.reply.is_none() {
++            if let Some(v) = self.script.pop_front() {
++                let method = v.get("method").and_then(Value::as_str).unwrap_or("command");
++                let params = v.get("params").cloned().unwrap_or_else(|| json!({}));
++                let (req, rx) = lightcraft_ui_egui::ControlRequest::new(method, params);
++                if self.sender.send(req).is_ok() {
++                    self.reply = Some(rx);
++                }
++            }
++        }
++        if self.frames.is_some() || self.reply.is_some() || !self.script.is_empty() {
++            ctx.request_repaint();
++        }
++    }
++    fn raw_input_hook(&mut self, r: &mut egui::RawInput) {
++        self.app.raw_input_hook(r);
++    }
++    fn ui(&mut self, ui: &mut egui::Ui) {
++        self.app.ui(ui);
++    }
++    fn close_requested(&mut self) -> bool {
++        lightcraft_ui_egui::panels::notices::may_close(&mut self.app)
++    }
++    fn quit_requested(&self) -> bool {
++        self.app.quit_confirmed || self.start.elapsed() > Duration::from_secs(180) && self.frames.is_some()
++    }
++    fn frame_done(&mut self, r: &egui_aros::FrameReport, pixels: &egui_aros::raster::Renderer) {
++        if self.frames.is_some_and(|n| r.frame >= n) && self.script.is_empty() && self.reply.is_none() {
++            if !self.captured {
++                if let Some(path) = &self.screenshot {
++                    let image = lightcraft_codecs::EncodeImage::new(r.width, r.height, 4, lightcraft_codecs::Samples::U8(&pixels.frame));
++                    let result = lightcraft_codecs::encode_png(&image, &Default::default())
++                        .map_err(|e| e.to_string())
++                        .and_then(|b| std::fs::write(path, b).map_err(|e| e.to_string()));
++                    if let Err(e) = result {
++                        line(&format!("screenshot: {e}"));
++                        self.failed = true;
++                    }
++                }
++                self.captured = true;
++            }
++            if lightcraft_ui_egui::panels::notices::may_close(&mut self.app) {
++                self.app.quit_confirmed = true;
++            }
++        }
++    }
++}
++fn run(opts: Options) -> Result<(), String> {
++    std::fs::create_dir_all("PROGDIR:LightCraftData").map_err(|e| format!("cannot create settings drawer: {e}"))?;
++    let prefs = PathBuf::from("PROGDIR:LightCraftData/ui.json");
++    let ui = if prefs.exists() {
++        Some(
++            serde_json::from_slice::<lightcraft_ui_egui::UiState>(&std::fs::read(&prefs).map_err(|e| e.to_string())?)
++                .map_err(|e| format!("saved settings: {e}; original preserved"))?,
++        )
++    } else {
++        None
++    };
++    let library = match opts.library {
++        Some(p) => p,
++        None => {
++            ui.as_ref().map(|u| u.settings.library_path.clone()).filter(|s| !s.is_empty()).unwrap_or(normalized("PROGDIR:LightCraftData/Library")?)
++        }
++    };
++    let mut session = lightcraft_engine::Session::new().with_fs().with_system_clock();
++    session.open_library(&library, opts.demo).map_err(|e| e.to_string())?;
++    let window = Rc::new(RefCell::new(None));
++    let drawer = Rc::new(RefCell::new(String::new()));
++    let (tx, rx) = mpsc::channel();
++    let mut app = LightcraftApp::new(session, services(window.clone(), drawer.clone())).with_control(rx);
++    if let Some(ui) = ui {
++        app.ui = ui;
++    }
++    app.ui.settings.gpu = false;
++    app.ui.settings.library_path = library;
++    if !opts.files.is_empty() {
++        lightcraft_ui_egui::import::start_paths(&mut app, opts.files)?;
++    }
++    let script = match opts.script {
++        Some(p) => std::fs::read_to_string(p)
++            .map_err(|e| e.to_string())?
++            .lines()
++            .filter(|s| !s.trim().is_empty())
++            .map(serde_json::from_str)
++            .collect::<Result<VecDeque<Value>, _>>()
++            .map_err(|e| e.to_string())?,
++        None => VecDeque::new(),
++    };
++    let report = opts.report.map(std::fs::File::create).transpose().map_err(|e| e.to_string())?;
++    let mut host = Host {
++        app,
++        window,
++        drawer,
++        start: Instant::now(),
++        frames: opts.frames,
++        screenshot: opts.screenshot,
++        captured: false,
++        script,
++        sender: tx,
++        reply: None,
++        report,
++        failed: false,
++    };
++    let size = egui_aros::screen_size().map(|(w, h)| (w.saturating_sub(30).min(1100), h.saturating_sub(70).min(720))).unwrap_or((1000, 650));
++    let result = egui_aros::run(
++        egui_aros::Options { title: "LightCraft".into(), inner_size: size, idle_poll: Some(Duration::from_millis(50)), ..Default::default() },
++        egui::Context::default(),
++        &mut host,
++    )
++    .map_err(|e| e.to_string());
++    let saved = serde_json::to_vec_pretty(&host.app.ui).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&prefs, b).map_err(|e| e.to_string()));
++    let closed = host.app.session.close_library().map_err(|e| e.to_string());
++    let stopped = host.app.shutdown(Duration::from_secs(10));
++    line(&format!("shutdown: window closed; workers_stopped={stopped}"));
++    result?;
++    saved?;
++    closed?;
++    if !stopped {
++        return Err("background workers did not stop within ten seconds".into());
++    }
++    if host.failed {
++        return Err("one or more scripted operations failed (see report)".into());
++    }
++    Ok(())
++}
+diff --git a/apps/lightcraft-cli/Cargo.toml b/apps/lightcraft-cli/Cargo.toml
+index b82aca1d591a53b43dfeb487bc4dabdd532979c7..ff7d5b44c67c05547ff8380975d4b5dc2bfec4c5 100644
+--- a/apps/lightcraft-cli/Cargo.toml
++++ b/apps/lightcraft-cli/Cargo.toml
+@@ -14,6 +14,7 @@ path = "src/main.rs"
+ workspace = true
+ 
+ [dependencies]
++lightcraft-launch-config = { path = "../../crates/launch-config" }
+ lightcraft-engine = { workspace = true }
+ lightcraft-denoise = { workspace = true }
+ lightcraft-sysmem = { workspace = true }
+@@ -25,8 +26,13 @@ lightcraft-merge = { workspace = true }
+ serde_json = { workspace = true }
+ dhat = { workspace = true, optional = true }
+ 
++[target.'cfg(target_os = "aros")'.dependencies]
++lightcraft-aros-platform = { path = "../../crates/aros-platform" }
++rayon-core = "=1.13.0"
++
+ [features]
+-default = ["denoise"]
++default = ["denoise", "gpu"]
++gpu = ["lightcraft-engine/gpu"]
+ denoise = ["lightcraft-engine/denoise"]
+ rawnind-model = ["denoise", "lightcraft-engine/rawnind-model"]
+ # Heap profiling: `cargo run --release -p lightcraft-cli --features dhat-heap -- snapshot …` counts
+diff --git a/apps/lightcraft-cli/src/main.rs b/apps/lightcraft-cli/src/main.rs
+index c8371cbb98507368b2c8ff582ff8145e9a3d54d8..b4f8d8058c727a44de4aa8e3e4d7dad7dfcc009c 100644
+--- a/apps/lightcraft-cli/src/main.rs
++++ b/apps/lightcraft-cli/src/main.rs
+@@ -155,7 +155,52 @@ fn main() -> ExitCode {
+     // Warnings (a GPU render redone on the CPU, an unknown backend name) on stderr; LIGHTCRAFT_LOG
+     // or RUST_LOG picks another level (#168).
+     lightcraft_engine::logging::install("lightcraft-cli");
++    #[cfg(target_os = "aros")]
++    if let Err(e) = std::env::set_current_dir(".") {
++        eprintln!("startup directory: {e}");
++        return ExitCode::FAILURE;
++    }
+     let args: Vec<String> = std::env::args().skip(1).collect();
++    let (request, args) = match lightcraft_launch_config::Request::parse(&args, &[]) {
++        Ok(v) => v,
++        Err(e) => {
++            eprintln!("configuration: {e}");
++            return ExitCode::from(2);
++        }
++    };
++    #[cfg(target_os = "aros")]
++    let args = match aros_paths(args) {
++        Ok(a) => a,
++        Err(e) => {
++            eprintln!("path: {e}");
++            return ExitCode::from(2);
++        }
++    };
++    // AROS product is deliberately CPU-only. Other CLI builds retain their compiled compute capability.
++    let caps = lightcraft_launch_config::Capabilities { gui_gpu: false, image_gpu: cfg!(all(feature = "gpu", not(target_os = "aros"))) };
++    let modes = match request.resolve(caps) {
++        Ok(v) => v,
++        Err(e) => {
++            eprintln!(
++                "GUI_RENDERER: requested={} actual=NOT_STARTED; IMAGE_COMPUTE: requested={} actual=NOT_STARTED; configuration: {e}",
++                request.gui.name(),
++                request.image.name()
++            );
++            return ExitCode::from(2);
++        }
++    };
++    for (key, mode) in [("GUI_RENDERER", &modes.gui), ("IMAGE_COMPUTE", &modes.image)] {
++        eprintln!(
++            "{key}: requested={} actual={}{}",
++            mode.requested.name(),
++            mode.actual.name(),
++            mode.reason.as_ref().map(|s| format!("; {s}")).unwrap_or_default()
++        );
++    }
++    if modes.image.actual == lightcraft_launch_config::Mode::Cpu {
++        lightcraft_engine::gpu::require_cpu();
++    }
++
+     let r = match args.first().map(String::as_str) {
+         Some("run") => run(&args[1..]),
+         Some("mcp") => mcp(&args[1..]),
+@@ -172,11 +217,13 @@ fn main() -> ExitCode {
+             Ok(())
+         }
+         Some("--help" | "-h" | "help") | None => {
+-            print!("{USAGE}");
++            print!("{USAGE}\n{}\n", lightcraft_launch_config::HELP);
+             Ok(())
+         }
+         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
+     };
++    #[cfg(target_os = "aros")]
++    rayon_core::terminate_global_thread_pool();
+     match r {
+         Ok(()) => ExitCode::SUCCESS,
+         Err(e) => {
+@@ -186,6 +233,47 @@ fn main() -> ExitCode {
+     }
+ }
+ 
++/// Convert path-bearing launch arguments before POSIX lexical code sees DOS names.
++#[cfg(target_os = "aros")]
++fn aros_paths(mut args: Vec<String>) -> Result<Vec<String>, String> {
++    let command = args.first().cloned().unwrap_or_default();
++    let mut path_next = false;
++    let mut skip_next = false;
++    let mut positional = 0;
++    for arg in args.iter_mut().skip(1) {
++        if path_next && arg == "-" {
++            path_next = false;
++        } else if path_next {
++            *arg = lightcraft_aros_platform::absolute(arg)?.to_str().ok_or("path is not UTF-8")?.to_string();
++            path_next = false;
++        } else if skip_next {
++            skip_next = false;
++        } else if matches!(arg.as_str(), "--library" | "--import" | "--script" | "--settings" | "--models" | "-o" | "--output") {
++            path_next = true;
++        } else if arg.starts_with('-') {
++            skip_next = matches!(
++                arg.as_str(),
++                "--set"
++                    | "--opt"
++                    | "--size"
++                    | "--quality"
++                    | "--preset"
++                    | "--scale"
++                    | "--max"
++                    | "--model"
++                    | "--listen"
++                    | "--token-env"
++                    | "--run-on"
++                    | "--max-connections"
++            );
++        } else if command == "render" && positional == 0 || matches!(command.as_str(), "snapshot" | "calibrate") {
++            *arg = lightcraft_aros_platform::absolute(arg)?.to_str().ok_or("path is not UTF-8")?.to_string();
++            positional += 1;
++        }
++    }
++    Ok(args)
++}
++
+ /// Raw files below `path` (or `path` itself), skipping hidden and NAS metadata folders.
+ fn raw_files(path: &Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+     let is_raw =
+diff --git a/apps/lightcraft/Cargo.toml b/apps/lightcraft/Cargo.toml
+index 95e080974f9c0e3b2801ae2ccfc9d96a1949ba68..1738c99a6de703b0a88b352cb8c239a7c57b96eb 100644
+--- a/apps/lightcraft/Cargo.toml
++++ b/apps/lightcraft/Cargo.toml
+@@ -18,7 +18,7 @@ rawnind-model = ["denoise", "lightcraft-engine/rawnind-model"]
+ heif = ["lightcraft-codecs/heif"]
+ 
+ [dependencies]
+-lightcraft-engine = { workspace = true, features = ["sam"] }
++lightcraft-engine = { workspace = true, features = ["sam", "gpu"] }
+ lightcraft-sysmem = { workspace = true }
+ lightcraft-ui-egui = { workspace = true }
+ lightcraft-codecs = { workspace = true }
+diff --git a/crates/aros-platform/Cargo.toml b/crates/aros-platform/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..0645a902bc24d689e4cd19dc414444409c3457ca
+--- /dev/null
++++ b/crates/aros-platform/Cargo.toml
+@@ -0,0 +1,7 @@
++[package]
++name = "lightcraft-aros-platform"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++[lints]
++workspace = true
+diff --git a/crates/aros-platform/build.rs b/crates/aros-platform/build.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b7c3f99b970ee62db1f00bf91232f365374d8bd
+--- /dev/null
++++ b/crates/aros-platform/build.rs
+@@ -0,0 +1,31 @@
++use std::{env, path::PathBuf, process::Command};
++fn main() {
++    println!("cargo:rerun-if-changed=c/platform.c");
++    for key in ["AROS_GCC", "AROS_AR", "AROS_SDK"] {
++        println!("cargo:rerun-if-env-changed={key}");
++    }
++    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("aros") {
++        return;
++    }
++    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
++    let cc = env::var_os("AROS_GCC").expect("set AROS_GCC");
++    let sdk = env::var("AROS_SDK").expect("set AROS_SDK");
++    let obj = out.join("platform.o");
++    assert!(
++        Command::new(cc)
++            .args([format!("--sysroot={sdk}"), "-O2".into(), "-Wall".into(), "-Werror".into(), "-c".into(), "c/platform.c".into(), "-o".into()])
++            .arg(&obj)
++            .status()
++            .expect("run AROS compiler")
++            .success()
++    );
++    let archive = out.join("liblightcraft_platform.a");
++    let _ = std::fs::remove_file(&archive);
++    assert!(
++        Command::new(env::var_os("AROS_AR").expect("set AROS_AR")).arg("rcs").arg(archive).arg(obj).status().expect("run AROS archiver").success()
++    );
++    println!("cargo:rustc-link-search=native={}", out.display());
++    println!("cargo:rustc-link-lib=static=lightcraft_platform");
++    println!("cargo:rustc-link-lib=icon");
++    println!("cargo:rustc-link-lib=intuition");
++}
+diff --git a/crates/aros-platform/c/platform.c b/crates/aros-platform/c/platform.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa07d0e7798f89417ee9b916b0e521708429ce9d
+--- /dev/null
++++ b/crates/aros-platform/c/platform.c
+@@ -0,0 +1,67 @@
++/* Workbench owns WBenchMsg and its argument locks until CRT startup returns.
++ * We borrow them on the main task only; every returned string is copied into
++ * caller storage. Never ReplyMsg, UnLock a borrowed lock, or retain DiskObject data. */
++#include <aros/startup.h>
++#include <workbench/startup.h>
++#include <workbench/workbench.h>
++#include <proto/dos.h>
++#include <proto/icon.h>
++#include <proto/intuition.h>
++#include <intuition/intuition.h>
++#include <string.h>
++
++int lc_workbench(void) { return WBenchMsg != NULL; }
++static int wb_path(int index, char *out, int cap) {
++    if (!WBenchMsg || index < 0 || index >= WBenchMsg->sm_NumArgs) return 0;
++    struct WBArg *arg = &WBenchMsg->sm_ArgList[index];
++    if (!NameFromLock(arg->wa_Lock, (STRPTR)out, cap)) return -1;
++    return AddPart((STRPTR)out, (CONST_STRPTR)arg->wa_Name, cap) ? 1 : -1;
++}
++int lc_wb_file(int index, char *out, int cap) { return wb_path(index, out, cap); }
++int lc_tooltype(const char *key, char *out, int cap) {
++    char path[8192];
++    if (!WBenchMsg) return 0;
++    if (wb_path(0, path, sizeof(path)) != 1) return -1;
++    struct DiskObject *icon = GetDiskObject((CONST_STRPTR)path);
++    if (!icon) return -1;
++    const char *value = (const char *)FindToolType(icon->do_ToolTypes, (STRPTR)key);
++    int result = 0;
++    if (value) {
++        size_t len = strlen(value);
++        if (len >= (size_t)cap) result = -1;
++        else { memcpy(out, value, len + 1); result = 1; }
++    }
++    FreeDiskObject(icon);
++    return result;
++}
++/* DOS resolves volumes, assigns, colon roots and parent slashes. For a new
++ * save name, resolve its existing drawer and append only the final component. */
++int lc_absolute(const char *name, char *out, int cap) {
++    BPTR lock = Lock((CONST_STRPTR)name, ACCESS_READ);
++    if (lock) {
++        int ok = NameFromLock(lock, (STRPTR)out, cap);
++        UnLock(lock);
++        return ok ? 1 : -1;
++    }
++    const char *file = (const char *)FilePart((CONST_STRPTR)name);
++    size_t prefix = file - name;
++    char drawer[8192];
++    if (!*file || prefix >= sizeof(drawer)) return -1;
++    memcpy(drawer, name, prefix); drawer[prefix] = 0;
++    lock = Lock((CONST_STRPTR)drawer, ACCESS_READ);
++    if (!lock) return -1;
++    int ok = NameFromLock(lock, (STRPTR)out, cap);
++    UnLock(lock);
++    return ok && AddPart((STRPTR)out, (CONST_STRPTR)file, cap) ? 1 : -1;
++}
++void lc_error(const char *message) {
++    struct EasyStruct es = { sizeof(struct EasyStruct), 0, (CONST_STRPTR)"LightCraft", (CONST_STRPTR)"%s", (CONST_STRPTR)"OK" };
++    IPTR args[] = { (IPTR)message };
++    EasyRequestArgs(NULL, &es, NULL, (RAWARG)args);
++}
++
++/* A DOS exclusive lock is released explicitly by the owning Rust guard.
++ * The caller creates/closes the placeholder first; no File descriptor is kept open. */
++IPTR lc_file_lock(const char *path) { return (IPTR)Lock((CONST_STRPTR)path, EXCLUSIVE_LOCK); }
++void lc_file_unlock(IPTR lock) { if (lock) UnLock((BPTR)lock); }
++int lc_dos_error(void) { return IoErr(); }
+diff --git a/crates/aros-platform/src/lib.rs b/crates/aros-platform/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..92f86cc7769d266647c8ce19166fab5ac47849bf
+--- /dev/null
++++ b/crates/aros-platform/src/lib.rs
+@@ -0,0 +1,164 @@
++//! AROS-only startup/path bridge. Unsafe code is isolated here, never in the engine/UI.
++#![allow(unsafe_code)]
++use std::path::PathBuf;
++#[cfg(target_os = "aros")]
++mod native {
++    use std::ffi::{CString, c_char};
++    unsafe extern "C" {
++        pub fn lc_workbench() -> i32;
++        pub fn lc_wb_file(index: i32, out: *mut c_char, cap: i32) -> i32;
++        pub fn lc_tooltype(key: *const c_char, out: *mut c_char, cap: i32) -> i32;
++        pub fn lc_absolute(name: *const c_char, out: *mut c_char, cap: i32) -> i32;
++        pub fn lc_file_lock(path: *const c_char) -> usize;
++        pub fn lc_file_unlock(lock: usize);
++        pub fn lc_dos_error() -> i32;
++        pub fn lc_error(message: *const c_char);
++    }
++    pub fn cstr(s: &str) -> Result<CString, String> {
++        CString::new(s).map_err(|_| "path/configuration contains NUL".into())
++    }
++    pub fn read(call: impl FnOnce(*mut c_char, i32) -> i32) -> Result<Option<String>, String> {
++        let mut bytes = vec![0u8; 8192];
++        let result = call(bytes.as_mut_ptr().cast(), bytes.len() as i32);
++        if result == 0 {
++            return Ok(None);
++        }
++        if result < 0 {
++            return Err("AROS could not resolve startup data or the path (missing drawer, unreadable icon, or path too long)".into());
++        }
++        let end = bytes.iter().position(|&b| b == 0).ok_or("unterminated DOS result")?;
++        bytes.truncate(end);
++        String::from_utf8(bytes).map(Some).map_err(|_| "DOS path is not UTF-8".into())
++    }
++}
++#[derive(Default, Debug)]
++pub struct Startup {
++    pub workbench: bool,
++    pub tooltypes: Vec<String>,
++    pub files: Vec<String>,
++}
++pub fn startup() -> Result<Startup, String> {
++    #[cfg(target_os = "aros")]
++    {
++        // SAFETY: read-only CRT global, while main still owns the startup lifetime.
++        if unsafe { native::lc_workbench() } == 0 {
++            return Ok(Startup::default());
++        }
++        let mut out = Startup { workbench: true, ..Startup::default() };
++        for key in ["GUI_RENDERER", "IMAGE_COMPUTE"] {
++            let c = native::cstr(key)?;
++            // SAFETY: valid strings and owned writable output, copied before DiskObject is freed.
++            if let Some(value) = native::read(|p, n| unsafe { native::lc_tooltype(c.as_ptr(), p, n) })? {
++                out.tooltypes.push(format!("{key}={value}"));
++            }
++        }
++        for i in 1..1024 {
++            // SAFETY: C checks index against the borrowed WBStartup argument array.
++            match native::read(|p, n| unsafe { native::lc_wb_file(i, p, n) })? {
++                Some(path) => out.files.push(dos_to_nix(&path)?),
++                None => return Ok(out),
++            }
++        }
++        Err("too many Workbench documents".into())
++    }
++    #[cfg(not(target_os = "aros"))]
++    Ok(Startup::default())
++}
++pub fn absolute(name: &str) -> Result<PathBuf, String> {
++    #[cfg(target_os = "aros")]
++    {
++        let c = native::cstr(name)?;
++        // SAFETY: input outlives call; DOS receives an owned writable buffer.
++        native::read(|p, n| unsafe { native::lc_absolute(c.as_ptr(), p, n) })?
++            .ok_or_else(|| "path was not resolved".to_string())
++            .and_then(|p| dos_to_nix(&p))
++            .map(PathBuf::from)
++    }
++    #[cfg(not(target_os = "aros"))]
++    std::path::absolute(name).map_err(|e| e.to_string())
++}
++pub fn show_error(message: &str) {
++    eprintln!("LightCraft: {message}");
++    #[cfg(target_os = "aros")]
++    if let Ok(c) = native::cstr(message) {
++        // SAFETY: NUL-terminated string, request completes before it is freed.
++        unsafe {
++            native::lc_error(c.as_ptr());
++        }
++    }
++}
++/// Convert a resolved DOS volume name to the selected -nix CRT path mode.
++/// No lexical parent collapsing: Lock/NameFromLock have already resolved it.
++pub fn dos_to_nix(path: &str) -> Result<String, String> {
++    let (volume, rest) = path.split_once(':').ok_or("DOS did not return a volume-qualified path")?;
++    if volume.is_empty() || volume.contains('/') {
++        return Err("invalid DOS volume name".into());
++    }
++    Ok(if rest.is_empty() { format!("/{volume}") } else { format!("/{volume}/{rest}") })
++}
++/// Only for already normalized engine paths passed back to an ASL requester.
++pub fn nix_to_dos(path: &str) -> Result<String, String> {
++    let rest = path.strip_prefix('/').ok_or("expected a normalized -nix absolute path")?;
++    let (volume, rest) = rest.split_once('/').unwrap_or((rest, ""));
++    if volume.is_empty() {
++        return Err("missing volume in -nix path".into());
++    }
++    Ok(format!("{volume}:{rest}"))
++}
++
++/// Drawer/name split follows AmigaDOS; a colon terminates a root drawer.
++pub fn split(path: &str) -> (&str, &str) {
++    match path.rfind(['/', ':']) {
++        Some(i) if path.as_bytes().get(i) == Some(&b':') => (&path[..=i], &path[i + 1..]),
++        Some(i) => (&path[..i], &path[i + 1..]),
++        None => ("", path),
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::{dos_to_nix, nix_to_dos, split};
++    #[test]
++    fn normalized_paths_round_trip() {
++        for p in ["RAM:", "Work:My Photos/zażółć.png", "Ram Disk:a.jpg"] {
++            assert_eq!(nix_to_dos(&dos_to_nix(p).unwrap()).unwrap(), p);
++        }
++        assert!(dos_to_nix(":bad").is_err());
++    }
++    #[test]
++    fn dos_drawers() {
++        assert_eq!(split("RAM:a.png"), ("RAM:", "a.png"));
++        assert_eq!(split("RAM:"), ("RAM:", ""));
++        assert_eq!(split("Work:My Photos/zażółć.png"), ("Work:My Photos", "zażółć.png"));
++        assert_eq!(split("a.png"), ("", "a.png"));
++    }
++}
++
++/// Exclusive DOS lock on an existing file, separate from POSIX try_lock (unsupported on v11).
++#[cfg(target_os = "aros")]
++#[derive(Debug)]
++pub struct FileLock(usize);
++#[cfg(target_os = "aros")]
++impl FileLock {
++    pub fn acquire(path: &std::path::Path) -> Result<Self, String> {
++        let dos = nix_to_dos(path.to_str().ok_or("lock path is not UTF-8")?)?;
++        let c = native::cstr(&dos)?;
++        // SAFETY: NUL-terminated owned name. A nonzero returned lock is owned by this guard.
++        let lock = unsafe { native::lc_file_lock(c.as_ptr()) };
++        if lock == 0 {
++            // SAFETY: reads main task's DOS error immediately after the failed Lock.
++            let code = unsafe { native::lc_dos_error() };
++            Err(format!("cannot exclusively lock {dos} (DOS error {code}); close any other LightCraft using this library"))
++        } else {
++            Ok(Self(lock))
++        }
++    }
++}
++#[cfg(target_os = "aros")]
++impl Drop for FileLock {
++    fn drop(&mut self) {
++        // SAFETY: exactly the nonzero lock acquired by this guard; never copied or released twice.
++        unsafe {
++            native::lc_file_unlock(self.0);
++        }
++    }
++}
+diff --git a/crates/catalog/Cargo.toml b/crates/catalog/Cargo.toml
+index 27273d5c4c8da24c4c06a72ed820148d7cc4d686..777ad4fcb5b62be90bfda68c0ecbe1f1e452ca0c 100644
+--- a/crates/catalog/Cargo.toml
++++ b/crates/catalog/Cargo.toml
+@@ -23,3 +23,6 @@ web-time = { workspace = true }
+ [dev-dependencies]
+ lightcraft-geom = { workspace = true }
+ proptest = { workspace = true }
++
++[target.'cfg(target_os = "aros")'.dependencies]
++lightcraft-aros-platform = { path = "../aros-platform" }
+diff --git a/crates/catalog/src/lock.rs b/crates/catalog/src/lock.rs
+index d699da0491cd170bdf05136d5e7ce21048abb5e1..19ca5ecacd4242905e6d415b3fec126aaa492af1 100644
+--- a/crates/catalog/src/lock.rs
++++ b/crates/catalog/src/lock.rs
+@@ -24,9 +24,10 @@
+ //!   advisory and depend on the server; the owner file is then the only hint.
+ //! - Browser storage (OPFS) has no file locks: see the web host for its own guard.
+ 
+-use std::fs::{File, OpenOptions, TryLockError};
+-use std::io;
++use std::fs::{File, OpenOptions};
+ use std::path::{Path, PathBuf};
++#[cfg(not(target_os = "aros"))]
++use std::{fs::TryLockError, io};
+ 
+ /// The lock file in the library directory.
+ pub const LOCK: &str = "catalog.lock";
+@@ -85,6 +86,8 @@ pub enum LockError {
+     /// Another process has the library open.
+     #[error("This library is already open in {}. Close it there first.", .0.as_ref().map(LockOwner::describe).unwrap_or_else(|| "another LightCraft program".into()))]
+     InUse(Option<LockOwner>),
++    #[error("{0}")]
++    Platform(String),
+ }
+ 
+ /// The exclusive lock on a library directory; released on drop (and by the OS if the process
+@@ -95,34 +98,60 @@ pub struct LibraryLock {
+     /// `None` when the file system can't lock (the library is open unlocked).
+     file: Option<File>,
+     held: bool,
++    #[cfg(target_os = "aros")]
++    dos: Option<lightcraft_aros_platform::FileLock>,
+ }
+ 
+ impl LibraryLock {
+     /// Lock `dir` (which must exist) for this process. Fails only when another process holds it.
+     pub fn acquire(dir: &Path, program: &str) -> Result<LibraryLock, LockError> {
+-        let unlocked = |why: io::Error| {
+-            log::warn!("library {}: can't lock {LOCK} ({why}); opening it without protection against a second program", dir.display());
+-            LibraryLock { dir: dir.to_path_buf(), file: None, held: false }
+-        };
+-        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(LOCK)) {
+-            Ok(f) => f,
+-            Err(e) => return Ok(unlocked(e)),
+-        };
+-        match file.try_lock() {
+-            Ok(()) => {}
+-            Err(TryLockError::WouldBlock) => {
+-                let owner = std::fs::read(dir.join(OWNER)).ok().and_then(|b| serde_json::from_slice::<LockOwner>(&b).ok());
+-                return Err(LockError::InUse(owner));
++        #[cfg(target_os = "aros")]
++        {
++            // Close the placeholder before taking an exclusive DOS lock on it.
++            drop(
++                OpenOptions::new()
++                    .read(true)
++                    .write(true)
++                    .create(true)
++                    .truncate(false)
++                    .open(dir.join(LOCK))
++                    .map_err(|e| LockError::Platform(e.to_string()))?,
++            );
++            let dos = lightcraft_aros_platform::FileLock::acquire(&dir.join(LOCK)).map_err(LockError::Platform)?;
++            let owner = LockOwner::this_process(program);
++            if let Ok(json) = serde_json::to_vec_pretty(&owner) {
++                if let Err(e) = std::fs::write(dir.join(OWNER), json) {
++                    log::warn!("can't write lock owner: {e}");
++                }
+             }
+-            Err(TryLockError::Error(e)) => return Ok(unlocked(e)),
++            return Ok(LibraryLock { dir: dir.to_path_buf(), file: None, held: true, dos: Some(dos) });
+         }
+-        let owner = LockOwner::this_process(program);
+-        if let Ok(json) = serde_json::to_vec_pretty(&owner)
+-            && let Err(e) = std::fs::write(dir.join(OWNER), json)
++        #[cfg(not(target_os = "aros"))]
+         {
+-            log::warn!("library {}: can't write {OWNER}: {e}", dir.display());
++            let unlocked = |why: io::Error| {
++                log::warn!("library {}: can't lock {LOCK} ({why}); opening it without protection against a second program", dir.display());
++                LibraryLock { dir: dir.to_path_buf(), file: None, held: false }
++            };
++            let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(LOCK)) {
++                Ok(f) => f,
++                Err(e) => return Ok(unlocked(e)),
++            };
++            match file.try_lock() {
++                Ok(()) => {}
++                Err(TryLockError::WouldBlock) => {
++                    let owner = std::fs::read(dir.join(OWNER)).ok().and_then(|b| serde_json::from_slice::<LockOwner>(&b).ok());
++                    return Err(LockError::InUse(owner));
++                }
++                Err(TryLockError::Error(e)) => return Ok(unlocked(e)),
++            }
++            let owner = LockOwner::this_process(program);
++            if let Ok(json) = serde_json::to_vec_pretty(&owner)
++                && let Err(e) = std::fs::write(dir.join(OWNER), json)
++            {
++                log::warn!("library {}: can't write {OWNER}: {e}", dir.display());
++            }
++            Ok(LibraryLock { dir: dir.to_path_buf(), file: Some(file), held: true })
+         }
+-        Ok(LibraryLock { dir: dir.to_path_buf(), file: Some(file), held: true })
+     }
+ 
+     /// The OS lock is held (`false`: the file system can't lock; opened unprotected).
+@@ -152,6 +181,8 @@ impl Drop for LibraryLock {
+     fn drop(&mut self) {
+         if self.held {
+             let _ = std::fs::remove_file(self.dir.join(OWNER));
++            #[cfg(target_os = "aros")]
++            drop(self.dos.take());
+             if let Some(f) = &self.file
+                 && let Err(e) = f.unlock()
+             {
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+index 9caa8cdb0efd2f585285357ee4241323f1594e7d..387a224a7f216b8b4fdb0ad24cf9347f49864913 100644
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -50,6 +50,8 @@ lightcraft-fetch = { workspace = true }
+ chrono = { workspace = true }
+ 
+ [features]
++default = ["gpu"]
++gpu = ["lightcraft-gpu/native"]
+ # AI masks with SAM 3 (Object / Describe). Off for the web and CLI builds.
+ sam = ["dep:lightcraft-segment"]
+ denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime", "lightcraft-gpu/denoise"]
+diff --git a/crates/engine/src/cmd/face_detect.rs b/crates/engine/src/cmd/face_detect.rs
+index 711bebb102f5297bbc965f479db74de7cf79791a..f0cae2a36834bd10340d7df741e0d1b26bf7d3c2 100644
+--- a/crates/engine/src/cmd/face_detect.rs
++++ b/crates/engine/src/cmd/face_detect.rs
+@@ -134,37 +134,45 @@ pub(crate) fn offer_gpu(
+     what: &'static str,
+     attach: impl FnOnce(Arc<dyn lightcraft_faces::net::Accelerator>) -> std::result::Result<(), String> + Send + 'static,
+ ) {
+-    if cpu_only(s) {
+-        set_gpu_state(what, GpuState { why: Some("the CPU is chosen in Settings".into()), ..GpuState::default() });
+-        return;
++    #[cfg(not(feature = "gpu"))]
++    {
++        let _ = (s, attach);
++        set_gpu_state(what, GpuState { why: Some("GPU compute is not compiled into this build".into()), ..GpuState::default() });
+     }
+-    let task = s.activity.start("facesGpu", "Checking the GPU for faces", crate::activity::Cancel::No);
+-    task.detail(what);
+-    set_gpu_state(what, GpuState { checking: true, ..GpuState::default() });
+-    let spawned = std::thread::Builder::new().name(format!("faces-gpu-{what}")).spawn(move || {
+-        let _task = task;
+-        let gpu = match lightcraft_gpu::faces::accelerator() {
+-            Ok(gpu) => gpu,
+-            Err(why) => {
+-                log::info!("faces: {what} runs on the CPU ({why})");
+-                return set_gpu_state(what, GpuState { why: Some(why), ..GpuState::default() });
+-            }
+-        };
+-        let device = lightcraft_faces::net::Accelerator::device(&*gpu);
+-        match attach(gpu) {
+-            Ok(()) => {
+-                log::info!("faces: {what} runs on {device}");
+-                set_gpu_state(what, GpuState { device: Some(device), ..GpuState::default() });
+-            }
+-            Err(why) => {
+-                log::info!("faces: {what} stays on the CPU: {why}");
+-                set_gpu_state(what, GpuState { why: Some(why), ..GpuState::default() });
++    #[cfg(feature = "gpu")]
++    {
++        if cpu_only(s) {
++            set_gpu_state(what, GpuState { why: Some("the CPU is chosen in Settings".into()), ..GpuState::default() });
++            return;
++        }
++        let task = s.activity.start("facesGpu", "Checking the GPU for faces", crate::activity::Cancel::No);
++        task.detail(what);
++        set_gpu_state(what, GpuState { checking: true, ..GpuState::default() });
++        let spawned = std::thread::Builder::new().name(format!("faces-gpu-{what}")).spawn(move || {
++            let _task = task;
++            let gpu = match lightcraft_gpu::faces::accelerator() {
++                Ok(gpu) => gpu,
++                Err(why) => {
++                    log::info!("faces: {what} runs on the CPU ({why})");
++                    return set_gpu_state(what, GpuState { why: Some(why), ..GpuState::default() });
++                }
++            };
++            let device = lightcraft_faces::net::Accelerator::device(&*gpu);
++            match attach(gpu) {
++                Ok(()) => {
++                    log::info!("faces: {what} runs on {device}");
++                    set_gpu_state(what, GpuState { device: Some(device), ..GpuState::default() });
++                }
++                Err(why) => {
++                    log::info!("faces: {what} stays on the CPU: {why}");
++                    set_gpu_state(what, GpuState { why: Some(why), ..GpuState::default() });
++                }
+             }
++        });
++        if let Err(e) = spawned {
++            log::warn!("faces: could not check the GPU for {what}: {e}");
++            set_gpu_state(what, GpuState { why: Some(format!("could not check the GPU: {e}")), ..GpuState::default() });
+         }
+-    });
+-    if let Err(e) = spawned {
+-        log::warn!("faces: could not check the GPU for {what}: {e}");
+-        set_gpu_state(what, GpuState { why: Some(format!("could not check the GPU: {e}")), ..GpuState::default() });
+     }
+ }
+ 
+diff --git a/crates/engine/src/cmd/face_recognize.rs b/crates/engine/src/cmd/face_recognize.rs
+index e66bb56f3680f796ad11d1bc5abc0d8c58a7ff41..3f321411bfd165ac07265e8f2c9fc93036e412fa 100644
+--- a/crates/engine/src/cmd/face_recognize.rs
++++ b/crates/engine/src/cmd/face_recognize.rs
+@@ -673,8 +673,11 @@ mod imp {
+             w.allow(target, pace);
+         }
+         // the GPU is held back the same way: a light pace leaves it mostly free for the window's own renders
+-        let (runs, share) = crate::faces_worker::gpu_pace(pace);
+-        lightcraft_gpu::faces::set_pace(runs, share);
++        #[cfg(feature = "gpu")]
++        {
++            let (runs, share) = crate::faces_worker::gpu_pace(pace);
++            lightcraft_gpu::faces::set_pace(runs, share);
++        }
+         while target > 0 && s.faces.in_flight.len() < target + PREFETCH {
+             let Some(id) = s.faces.queue.pop() else { break };
+             let Some(job) = prepare(s, id, true) else { continue };
+diff --git a/crates/engine/src/denoise.rs b/crates/engine/src/denoise.rs
+index 8793b3a5bfa118aaf6a68c0a6250c2c629252899..591327b90c041d98bdfe9b83e8bd2deb1a98247d 100644
+--- a/crates/engine/src/denoise.rs
++++ b/crates/engine/src/denoise.rs
+@@ -352,7 +352,7 @@ fn card_tile_ms(runner: &dyn TileRunner, input: &[f32]) -> f64 {
+ }
+ 
+ /// Set the card up for the model at `path`: kernels built, the check tile run on both and compared, both timed.
+-#[cfg(feature = "denoise")]
++#[cfg(all(feature = "denoise", feature = "gpu"))]
+ fn make_gpu(cpu: &lightcraft_denoise::runtime::CpuRunner, path: &Path, tile: usize) -> Result<GpuSide, String> {
+     let input = Arc::new(lightcraft_denoise::runtime::check_tile(tile));
+     let (on_card, net) = (input.clone(), cpu.net().clone());
+@@ -376,6 +376,11 @@ fn make_gpu(cpu: &lightcraft_denoise::runtime::CpuRunner, path: &Path, tile: usi
+     Ok(GpuSide { adapter: runner.adapter(), runner: Box::new(runner), card_ms, cpu_ms })
+ }
+ 
++#[cfg(all(feature = "denoise", not(feature = "gpu")))]
++fn make_gpu(_cpu: &lightcraft_denoise::runtime::CpuRunner, _path: &Path, _tile: usize) -> Result<GpuSide, String> {
++    Err("GPU compute is not compiled into this build".into())
++}
++
+ #[cfg(feature = "denoise")]
+ impl Network {
+     /// The card when it can be used now, else why not. `start` sets it up when that has not been tried yet; without it
+@@ -398,6 +403,7 @@ impl Network {
+             Some(Err(why)) => return Err(why.clone()),
+             Some(Ok(g)) => g,
+         };
++        #[cfg(feature = "gpu")]
+         if let Some(why) = lightcraft_gpu::nn::broken_reason() {
+             return Err(format!("the graphics card stopped working ({why})"));
+         }
+diff --git a/crates/engine/src/faces_worker.rs b/crates/engine/src/faces_worker.rs
+index 61dbc254436552c251edd9b62d01c485cbbe85c6..5c9d20a5faaca5e4b6ff07cb47d0c32b5d2af9df 100644
+--- a/crates/engine/src/faces_worker.rs
++++ b/crates/engine/src/faces_worker.rs
+@@ -130,6 +130,7 @@ fn pool_threads_for(cores: usize, pace: Pace, cap: Option<usize>) -> usize {
+ /// How much of the GPU face models may take at `pace`: face model runs at once, and the share of the time it may be
+ /// busy. Paused or light: one run at a time, busy a quarter of the time (the user is working, and the window renders
+ /// on the same GPU); normal: two at once, busy most of the time; full: as fast as it goes.
++#[cfg(any(feature = "gpu", test))]
+ pub(crate) fn gpu_pace(pace: Pace) -> (usize, f32) {
+     match pace {
+         Pace::Pause | Pace::Light => (1, 0.25),
+diff --git a/crates/gpu/Cargo.toml b/crates/gpu/Cargo.toml
+index 02edcefd1b4b9150b138132dd73dfa0d2e9c1711..964bd78b9413be946b809d8d56196f9c3efa496a 100644
+--- a/crates/gpu/Cargo.toml
++++ b/crates/gpu/Cargo.toml
+@@ -21,12 +21,13 @@ log = { workspace = true }
+ # Native only: Metal / Vulkan / DX12 through wgpu (pure Rust; the drivers are the system's).
+ # The browser build keeps the CPU pipeline (WebGPU needs async device creation: see docs/gpu-pipeline.md).
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+-wgpu = { workspace = true }
+-pollster = { workspace = true }
+-bytemuck = { workspace = true }
++wgpu = { workspace = true, optional = true }
++pollster = { workspace = true, optional = true }
++bytemuck = { workspace = true, optional = true }
+ 
+ [features]
+-default = []
++default = ["native"]
++native = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+ denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime"]
+ 
+ [dev-dependencies]
+diff --git a/crates/gpu/src/lib.rs b/crates/gpu/src/lib.rs
+index 7efae6a576329f53839ecc795d82dd9e00ec4e68..64fc3cc9652c2b547a0e323b78e24492634412c6 100644
+--- a/crates/gpu/src/lib.rs
++++ b/crates/gpu/src/lib.rs
+@@ -29,24 +29,31 @@ use lightcraft_develop::DevelopSettings;
+ use lightcraft_pipeline::{RenderRequest, Rendered, SourceInfo, StageCache};
+ use lightcraft_raster::Rgb32f;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub mod backend;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ mod ctx;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ mod exit;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub mod faces;
+-#[cfg(all(feature = "denoise", not(target_arch = "wasm32")))]
++#[cfg(all(feature = "denoise", all(feature = "native", not(target_arch = "wasm32"))))]
+ pub mod nn;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ mod params;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ mod render;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub use render::GpuStages;
+ 
++static CPU_REQUIRED: AtomicBool = AtomicBool::new(false);
++
++/// Process policy set before workers; preferences cannot undo an explicit CPU launch.
++pub fn require_cpu() {
++    CPU_REQUIRED.store(true, Ordering::Relaxed);
++}
++
+ static ENABLED: AtomicBool = AtomicBool::new(true);
+ /// Set when a GPU render failed: the process stays on the CPU from then on.
+ static BROKEN: AtomicBool = AtomicBool::new(false);
+@@ -57,7 +64,7 @@ static BROKEN_REASON: Mutex<Option<String>> = Mutex::new(None);
+ static LAST_FALLBACK: Mutex<Option<String>> = Mutex::new(None);
+ 
+ /// Stop using the GPU for the rest of the process (after a device error).
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(not(feature = "native"), target_arch = "wasm32"), allow(dead_code))]
+ fn mark_broken(reason: &str) {
+     let mut r = BROKEN_REASON.lock().unwrap_or_else(|e| e.into_inner());
+     if r.is_none() {
+@@ -66,7 +73,7 @@ fn mark_broken(reason: &str) {
+     BROKEN.store(true, Ordering::Relaxed);
+ }
+ 
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(not(feature = "native"), target_arch = "wasm32"), allow(dead_code))]
+ fn record_fallback(reason: String) {
+     *LAST_FALLBACK.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+ }
+@@ -78,6 +85,9 @@ pub fn unavailable_reason() -> Option<String> {
+     if let Some(why) = env_off_reason() {
+         return Some(why.into());
+     }
++    if CPU_REQUIRED.load(Ordering::Relaxed) {
++        return Some("CPU required by launch configuration".into());
++    }
+     if !ENABLED.load(Ordering::Relaxed) {
+         return Some("disabled by the GPU rendering preference (app.gpu)".into());
+     }
+@@ -91,16 +101,16 @@ pub fn unavailable_reason() -> Option<String> {
+     if let Some(r) = broken_here() {
+         return Some(format!("stopped after a GPU failure: {r}"));
+     }
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         match GPU.get() {
+             Some(Err(e)) => Some(e.clone()),
+             _ => None,
+         }
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+-        Some("the browser build has no GPU path yet".into())
++        Some("GPU compute is not compiled into this build".into())
+     }
+ }
+ 
+@@ -162,13 +172,13 @@ pub fn inject_fault(f: Fault) {
+     FAULT.with(|c| c.set(Some(f)));
+ }
+ 
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(not(feature = "native"), target_arch = "wasm32"), allow(dead_code))]
+ fn take_fault() -> Option<Fault> {
+     FAULT.with(|c| c.take())
+ }
+ 
+ /// Stop using the GPU on this thread (a simulated fatal failure).
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(not(feature = "native"), target_arch = "wasm32"), allow(dead_code))]
+ fn mark_broken_here(reason: &str) {
+     let _ = BROKEN_HERE.try_with(|b| {
+         let mut b = b.borrow_mut();
+@@ -199,24 +209,29 @@ pub fn set_enabled(on: bool) {
+ /// Whether GPU rendering is allowed (environment, preference, no earlier failure — real, or
+ /// simulated on this thread).
+ pub fn enabled() -> bool {
+-    ENABLED.load(Ordering::Relaxed) && !BROKEN.load(Ordering::Relaxed) && !env_disabled() && broken_here().is_none()
++    !CPU_REQUIRED.load(Ordering::Relaxed)
++        && cfg!(all(feature = "native", not(target_arch = "wasm32")))
++        && ENABLED.load(Ordering::Relaxed)
++        && !BROKEN.load(Ordering::Relaxed)
++        && !env_disabled()
++        && broken_here().is_none()
+ }
+ 
+ /// The process is about to end: no GPU work starts from now on, on any thread. [`render`] returns
+ /// `None` (callers render on the CPU), the devices are not created and denoise tiles fail over to
+ /// the CPU. There is no way back. Follow it with [`wait_idle`].
+ pub fn begin_shutdown() {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     exit::begin_shutdown();
+ }
+ 
+ /// Whether [`begin_shutdown`] was called.
+ pub fn shutting_down() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         exit::shutting_down()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         false
+     }
+@@ -226,11 +241,11 @@ pub fn shutting_down() -> bool {
+ /// and after [`begin_shutdown`] none can start, so the process may end; `false`: the deadline
+ /// passed with a render (or a device being created) still inside the driver.
+ pub fn wait_idle(timeout: std::time::Duration) -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         exit::wait_idle(timeout)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         let _ = timeout;
+         true
+@@ -239,7 +254,7 @@ pub fn wait_idle(timeout: std::time::Duration) -> bool {
+ 
+ /// Why GPU compute that has a device of its own (denoise, faces) is switched off by the user's settings, or `None`: the
+ /// environment switches and the rendering preference, but not a render-device failure (the devices are separate).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub(crate) fn switched_off() -> Option<String> {
+     if let Some(why) = env_off_reason() {
+         return Some(why.into());
+@@ -251,10 +266,13 @@ pub(crate) fn switched_off() -> Option<String> {
+ /// `LIGHTCRAFT_GPU_BACKEND=off`), or `None`. Code with a GPU path of its own (the SAM 3 model on
+ /// Metal) follows it too.
+ pub fn env_off_reason() -> Option<&'static str> {
++    if CPU_REQUIRED.load(Ordering::Relaxed) {
++        return Some("CPU required by launch configuration");
++    }
+     if !env_disabled() {
+         return None;
+     }
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     if backend::env_off() {
+         return Some("disabled by LIGHTCRAFT_GPU_BACKEND=off");
+     }
+@@ -264,18 +282,19 @@ pub fn env_off_reason() -> Option<&'static str> {
+ /// `LIGHTCRAFT_GPU=0` (or `LIGHTCRAFT_GPU_BACKEND=off`): no GPU for the whole process.
+ fn env_disabled() -> bool {
+     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-    *OFF.get_or_init(|| {
+-        let off = std::env::var("LIGHTCRAFT_GPU").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false" | "no"));
+-        #[cfg(not(target_arch = "wasm32"))]
+-        let off = off || backend::env_off();
+-        off
+-    })
++    CPU_REQUIRED.load(Ordering::Relaxed)
++        || *OFF.get_or_init(|| {
++            let off = std::env::var("LIGHTCRAFT_GPU").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false" | "no"));
++            #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
++            let off = off || backend::env_off();
++            off
++        })
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ static GPU: std::sync::OnceLock<Result<ctx::Gpu, String>> = std::sync::OnceLock::new();
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub(crate) fn device() -> Option<&'static ctx::Gpu> {
+     // turned off (preference, environment): don't even load the driver (issue #136)
+     if env_disabled() || !ENABLED.load(Ordering::Relaxed) {
+@@ -301,7 +320,7 @@ pub(crate) fn device() -> Option<&'static ctx::Gpu> {
+ }
+ 
+ /// The device if it has been created (never creates it).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
+     GPU.get().and_then(|g| g.as_ref().ok())
+ }
+@@ -310,7 +329,7 @@ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
+ /// so the first render doesn't wait ~0.3–0.4 s for it and the UI thread never does. Does nothing
+ /// while GPU rendering is turned off.
+ pub fn warm_up() {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     if !env_disabled() && ENABLED.load(Ordering::Relaxed) && GPU.get().is_none() {
+         let _ = std::thread::Builder::new().name("lc-gpu-init".into()).spawn(|| {
+             let _ = device();
+@@ -320,11 +339,11 @@ pub fn warm_up() {
+ 
+ /// Has device creation finished (successfully or not)? Never blocks — for status displays.
+ pub fn ready() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         env_disabled() || GPU.get().is_some()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         true
+     }
+@@ -333,11 +352,11 @@ pub fn ready() -> bool {
+ /// Whether a usable GPU adapter exists and GPU rendering is enabled (creates the device on first
+ /// use).
+ pub fn available() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         enabled() && device().is_some()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         false
+     }
+@@ -345,22 +364,22 @@ pub fn available() -> bool {
+ 
+ /// The adapter's name and backend, e.g. "Apple M4 Pro (Metal)".
+ pub fn adapter_name() -> Option<String> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         device().map(|g| format!("{} ({:?})", g.info.name, g.info.backend))
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         None
+     }
+ }
+ 
+ /// Device buffers held by the renderer.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+ pub use ctx::GpuMemory;
+ 
+ /// Device buffers held by the renderer.
+-#[cfg(target_arch = "wasm32")]
++#[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct GpuMemory {
+     pub allocated: u64,
+@@ -370,11 +389,11 @@ pub struct GpuMemory {
+ 
+ /// Device memory held by the renderer's buffers (zero without a device).
+ pub fn memory() -> GpuMemory {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         ctx::memory()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         GpuMemory::default()
+     }
+@@ -382,18 +401,18 @@ pub fn memory() -> GpuMemory {
+ 
+ /// Keep at most `bytes` of recycled buffers in the free pool from now on (trimming it now).
+ pub fn set_pool_limit(bytes: u64) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         ctx::POOL_LIMIT.store(bytes, Ordering::Relaxed);
+         trim_pool(bytes);
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     let _ = bytes;
+ }
+ 
+ /// Free recycled buffers until at most `keep` bytes stay pooled (e.g. when the app goes idle).
+ pub fn trim_pool(keep: u64) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     if let Some(g) = existing_device()
+         && let Some(_work) = exit::enter()
+     {
+@@ -402,17 +421,17 @@ pub fn trim_pool(keep: u64) {
+         }
+         g.trim(keep);
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     let _ = keep;
+ }
+ 
+ /// Device bytes of the one big source (a zoom window's original) shared by every view of the photo.
+ pub fn shared_source_bytes() -> usize {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         render::shared_source_bytes()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         0
+     }
+@@ -420,11 +439,11 @@ pub fn shared_source_bytes() -> usize {
+ 
+ /// Big sources uploaded to the shared copy so far (a diagnostic: one big photo is uploaded once, not once per window).
+ pub fn source_uploads() -> u64 {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         render::source_uploads()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         0
+     }
+@@ -432,11 +451,11 @@ pub fn source_uploads() -> u64 {
+ 
+ /// Device bytes held by a view's GPU stages (kept with its [`StageCache`]); 0 when it has none.
+ pub fn stage_bytes(stages: &StageCache) -> usize {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         stages.peek_extension::<GpuStages>().map(|g| g.bytes()).unwrap_or(0)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         let _ = stages;
+         0
+@@ -468,7 +487,7 @@ pub fn try_render(
+     req: &RenderRequest,
+     stages: Option<&StageCache>,
+ ) -> Result<Rendered, Fallback> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     {
+         // sections switched off with their eye render as if at their defaults (issue #316)
+         let effective = s.effective();
+@@ -541,7 +560,7 @@ pub fn try_render(
+         record_fallback(reason.clone());
+         Err(Fallback::Failed(reason))
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(not(feature = "native"), target_arch = "wasm32"))]
+     {
+         let _ = (src, info, s, req, stages);
+         Err(Fallback::NotTried)
+diff --git a/crates/launch-config/Cargo.toml b/crates/launch-config/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ecd2c65df5277569e8206b3db4612e6a78aa5c7
+--- /dev/null
++++ b/crates/launch-config/Cargo.toml
+@@ -0,0 +1,7 @@
++[package]
++name = "lightcraft-launch-config"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++[lints]
++workspace = true
+diff --git a/crates/launch-config/src/lib.rs b/crates/launch-config/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..99c7d23efcbb390b6ed24c95f310ca783728cc95
+--- /dev/null
++++ b/crates/launch-config/src/lib.rs
+@@ -0,0 +1,158 @@
++//! Shared Shell/Workbench rendering configuration. No platform or GPU calls.
++#![forbid(unsafe_code)]
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum Mode {
++    #[default]
++    Cpu,
++    Auto,
++    Gpu,
++}
++impl Mode {
++    pub fn parse(value: &str, key: &str) -> Result<Self, String> {
++        match value.trim().to_ascii_uppercase().as_str() {
++            "CPU" => Ok(Self::Cpu),
++            "AUTO" => Ok(Self::Auto),
++            "GPU" => Ok(Self::Gpu),
++            _ => Err(format!("{key}: unknown value `{value}`; expected CPU, AUTO or GPU")),
++        }
++    }
++    pub fn name(self) -> &'static str {
++        match self {
++            Self::Cpu => "CPU",
++            Self::Auto => "AUTO",
++            Self::Gpu => "GPU",
++        }
++    }
++}
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct Request {
++    pub gui: Mode,
++    pub image: Mode,
++}
++#[derive(Clone, Copy, Debug)]
++pub struct Capabilities {
++    pub gui_gpu: bool,
++    pub image_gpu: bool,
++}
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Selection {
++    pub requested: Mode,
++    pub actual: Mode,
++    pub reason: Option<String>,
++}
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Resolved {
++    pub gui: Selection,
++    pub image: Selection,
++}
++impl Request {
++    /// CLI > Workbench tooltypes > CPU. Shell callers pass no tooltypes.
++    /// Only the selected value is parsed, so a stale icon cannot override CLI.
++    pub fn parse(args: &[String], tooltypes: &[String]) -> Result<(Self, Vec<String>), String> {
++        let mut gui = None;
++        let mut image = None;
++        let mut rest = Vec::new();
++        let mut iter = args.iter();
++        while let Some(arg) = iter.next() {
++            if arg == "--" {
++                rest.push(arg.clone());
++                rest.extend(iter.cloned());
++                break;
++            }
++            let (key, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(k, v)| (k, Some(v)));
++            let slot = match key {
++                "--gui-renderer" => &mut gui,
++                "--image-compute" => &mut image,
++                _ => {
++                    rest.push(arg.clone());
++                    continue;
++                }
++            };
++            let value = inline.or_else(|| iter.next().map(String::as_str)).ok_or_else(|| format!("{key}: missing CPU, AUTO or GPU value"))?;
++            *slot = Some(Mode::parse(value, key)?);
++        }
++        for entry in tooltypes {
++            let Some((key, value)) = entry.split_once('=') else { continue };
++            match key.trim().to_ascii_uppercase().as_str() {
++                "GUI_RENDERER" if gui.is_none() => gui = Some(Mode::parse(value, "GUI_RENDERER")?),
++                "IMAGE_COMPUTE" if image.is_none() => image = Some(Mode::parse(value, "IMAGE_COMPUTE")?),
++                _ => {}
++            }
++        }
++        Ok((Self { gui: gui.unwrap_or_default(), image: image.unwrap_or_default() }, rest))
++    }
++    pub fn resolve(self, caps: Capabilities) -> Result<Resolved, String> {
++        fn select(requested: Mode, present: bool, path: &str) -> Result<Selection, String> {
++            let absent = format!("this build does not contain a GPU backend for {path}");
++            match requested {
++                Mode::Cpu => Ok(Selection { requested, actual: Mode::Cpu, reason: None }),
++                Mode::Auto if !present => Ok(Selection { requested, actual: Mode::Cpu, reason: Some(absent) }),
++                Mode::Gpu if !present => Err(format!("{path}=GPU: {absent}. Choose CPU or AUTO.")),
++                _ => Ok(Selection { requested, actual: Mode::Gpu, reason: None }),
++            }
++        }
++        Ok(Resolved { gui: select(self.gui, caps.gui_gpu, "GUI_RENDERER")?, image: select(self.image, caps.image_gpu, "IMAGE_COMPUTE")? })
++    }
++}
++
++pub const HELP: &str = "Rendering options (independent):\n  --gui-renderer CPU|AUTO|GPU\n  --image-compute CPU|AUTO|GPU\nCPU: no GPU initialization/probing (default). AUTO: try a supported GPU backend,\nelse CPU with a logged reason. GPU: require GPU, else a startup error.\nWorkbench ToolTypes: GUI_RENDERER=CPU, IMAGE_COMPUTE=CPU.\nPriority: explicit CLI > Workbench ToolType > CPU. Values are case-insensitive.\nThis AROS build is CPU-only for both paths.\nLegacy LIGHTCRAFT_GPU/LIGHTCRAFT_GPU_BACKEND/WGPU_BACKEND cannot enable GPU\nwhen CPU is selected; their values are recorded in the startup log.";
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn args(s: &[&str]) -> Vec<String> {
++        s.iter().map(|s| s.to_string()).collect()
++    }
++    #[test]
++    fn defaults_are_independent_cpu() {
++        let (r, rest) = Request::parse(&[], &[]).unwrap();
++        assert_eq!(r, Request { gui: Mode::Cpu, image: Mode::Cpu });
++        assert!(rest.is_empty());
++    }
++    #[test]
++    fn cli_overrides_workbench_with_mixed_case_and_keeps_files() {
++        let (r, rest) = Request::parse(
++            &args(&["--gui-renderer", "cPu", "--image-compute=AuTo", "RAM:My Photo.png"]),
++            &["GUI_RENDERER=GPU".into(), "IMAGE_COMPUTE=CPU".into()],
++        )
++        .unwrap();
++        assert_eq!(r, Request { gui: Mode::Cpu, image: Mode::Auto });
++        assert_eq!(rest, args(&["RAM:My Photo.png"]));
++    }
++    #[test]
++    fn workbench_values_use_same_parser() {
++        let (r, _) = Request::parse(&[], &args(&["gui_renderer=aUtO", "IMAGE_COMPUTE=gPu", "(GUI_RENDERER=GPU)"])).unwrap();
++        assert_eq!(r, Request { gui: Mode::Auto, image: Mode::Gpu });
++    }
++    #[test]
++    fn bad_values_and_missing_arguments_are_errors() {
++        for a in [args(&["--gui-renderer", "fast"]), args(&["--image-compute"]), args(&["--image-compute="])] {
++            assert!(Request::parse(&a, &[]).is_err());
++        }
++        assert!(Request::parse(&[], &args(&["GUI_RENDERER=bogus"])).is_err());
++    }
++    #[test]
++    fn cpu_only_auto_explains_and_gpu_refuses_each_path() {
++        let caps = Capabilities { gui_gpu: false, image_gpu: false };
++        let r = Request { gui: Mode::Auto, image: Mode::Cpu }.resolve(caps).unwrap();
++        assert_eq!(r.gui.actual, Mode::Cpu);
++        assert!(r.gui.reason.as_deref().unwrap().contains("build"));
++        assert!(r.image.reason.is_none());
++        for request in [Request { gui: Mode::Gpu, image: Mode::Cpu }, Request { gui: Mode::Cpu, image: Mode::Gpu }] {
++            assert!(request.resolve(caps).unwrap_err().contains("backend"));
++        }
++    }
++    #[test]
++    fn capabilities_are_separate() {
++        let caps = Capabilities { gui_gpu: true, image_gpu: false };
++        let r = Request { gui: Mode::Auto, image: Mode::Auto }.resolve(caps).unwrap();
++        assert_eq!(r.gui.actual, Mode::Gpu);
++        assert_eq!(r.image.actual, Mode::Cpu);
++    }
++    #[test]
++    fn dash_dash_keeps_document_names() {
++        let (_, rest) = Request::parse(&args(&["--", "--gui-renderer=GPU"]), &[]).unwrap();
++        assert_eq!(rest, args(&["--", "--gui-renderer=GPU"]));
++    }
++}

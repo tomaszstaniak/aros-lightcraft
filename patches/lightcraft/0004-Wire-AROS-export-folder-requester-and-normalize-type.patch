@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LightCraft AROS port <lightcraft-aros@invalid>
+Date: Sat, 24 Oct 2026 02:42:44 +0200
+Subject: [PATCH] Wire AROS export folder requester and normalize typed
+ destinations
+
+---
+ apps/lightcraft-aros/src/native.rs | 11 +++++++++++
+ crates/aros-platform/src/lib.rs    | 18 ++++++++++++++++++
+ crates/ui-egui/Cargo.toml          |  3 +++
+ crates/ui-egui/src/control.rs      |  8 ++++++++
+ 4 files changed, 40 insertions(+)
+
+diff --git a/apps/lightcraft-aros/src/native.rs b/apps/lightcraft-aros/src/native.rs
+index 456e4a0fdee0401c378ed13b5c186b36a3d12350..d26599b4ba19f31989a6c66d3c6eedde130f978e 100644
+--- a/apps/lightcraft-aros/src/native.rs
++++ b/apps/lightcraft-aros/src/native.rs
+@@ -191,7 +191,18 @@ type SharedWindow = Rc<RefCell<Option<egui_aros::WindowHandle>>>;
+ fn services(window: SharedWindow, drawer: Rc<RefCell<String>>) -> Services {
+     let pick_window = window.clone();
+     let pick_dir = drawer.clone();
++    let folder_window = window.clone();
++    let folder_dir = drawer.clone();
+     Services {
++        // The upstream Export dialog still calls the synchronous folder service.
++        pick_folder: Some(Box::new(move || {
++            let window = folder_window.borrow().clone()?;
++            let paths = egui_aros::asl::request(&window, egui_aros::asl::Select::Drawer, "Choose folder", &folder_dir.borrow(), "", "");
++            paths.into_iter().next().and_then(|p| match normalized(&p) {
++                Ok(p) => Some(p),
++                Err(e) => { line(&format!("folder requester: {e}")); None }
++            })
++        })),
+         picker: Some(Box::new(move |req| {
+             use lightcraft_ui_egui::pick::PickKind;
+             let window = pick_window.borrow().clone().ok_or("window is not open")?;
+diff --git a/crates/aros-platform/src/lib.rs b/crates/aros-platform/src/lib.rs
+index 92f86cc7769d266647c8ce19166fab5ac47849bf..14bbf44d321111ffd6cb153005174031e08153a4 100644
+--- a/crates/aros-platform/src/lib.rs
++++ b/crates/aros-platform/src/lib.rs
+@@ -162,3 +162,21 @@ impl Drop for FileLock {
+         }
+     }
+ }
++
++/// Export controls already carry -nix paths from pickers/protocol requests. Resolve
++/// human-entered DOS/relative paths before upstream PathBuf joins a new leaf.
++pub fn engine_path(name: &str) -> Result<String, String> {
++    if name.is_empty() || name.starts_with('/') && !name.contains(':') {
++        return Ok(name.to_owned());
++    }
++    absolute(name)?.into_os_string().into_string().map_err(|_| "path is not UTF-8".into())
++}
++#[cfg(test)]
++mod engine_path_tests {
++    #[test]
++    fn normalized_export_paths_are_preserved() {
++        for p in ["", "/RAM Disk", "/Work/My Photos/zażółć.png"] {
++            assert_eq!(super::engine_path(p).unwrap(), p);
++        }
++    }
++}
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 250b3cfc1c554466d9946ba93aba5e7cb2cf23d4..8fa25365116f6dd93c1174e396f35156dd227272 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -40,3 +40,6 @@ lightcraft-merge = { workspace = true }
+ [build-dependencies]
+ serde_json = { workspace = true }
+ toml = "1"
++
++[target.'cfg(target_os = "aros")'.dependencies]
++lightcraft-aros-platform = { path = "../aros-platform" }
+diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
+index efb3ea3ac5474220577e88623c164f374a50aa97..dd26ba2ce420585d314878b125afa7b1cd3d6b76 100644
+--- a/crates/ui-egui/src/control.rs
++++ b/crates/ui-egui/src/control.rs
+@@ -531,6 +531,14 @@ pub fn export_active(app: &mut LightcraftApp, p: &Value) -> Result<Value, String
+     if dir.is_empty() && exact.is_none() && !own_folders {
+         return Err(NO_EXPORT_FOLDER.into());
+     }
++    // Native requesters return normalized -nix paths. A folder typed in the dialog
++    // may instead be AmigaDOS (RAM:, an assign, or a relative drawer). Resolve it
++    // before the engine joins a generated file name, especially at volume roots.
++    #[cfg(target_os = "aros")]
++    let (dir, exact) = (
++        lightcraft_aros_platform::engine_path(&dir)?,
++        exact.map(|p| lightcraft_aros_platform::engine_path(&p)).transpose()?,
++    );
+     let to = Destination { dir: dir.clone(), exact };
+     // Add to Apple Photos: refused here, before anything is written, when it can't be done
+     let after = app.session.after_export(&opts)?;

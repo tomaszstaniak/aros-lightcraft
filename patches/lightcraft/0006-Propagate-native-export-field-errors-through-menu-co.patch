@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LightCraft AROS port <lightcraft-aros@invalid>
+Date: Sat, 24 Oct 2026 03:10:08 +0200
+Subject: [PATCH] Propagate native export field errors through menu command
+ result
+
+---
+ crates/ui-egui/src/menus.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/ui-egui/src/menus.rs b/crates/ui-egui/src/menus.rs
+index 6bda2a2e816251756f6c5379d70c57e870afcd5b..0635ddbcc840ea6bb9e20ef75c06deb90365e96a 100644
+--- a/crates/ui-egui/src/menus.rs
++++ b/crates/ui-egui/src/menus.rs
+@@ -1490,7 +1490,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
+             let u = |k: &str, d: u64| prev.get(k).and_then(Value::as_u64).unwrap_or(d);
+             let dir = prev.get("dir").and_then(Value::as_str).map(str::to_string).unwrap_or_else(crate::control::default_export_dir);
+             #[cfg(target_os = "aros")]
+-            let dir = lightcraft_aros_platform::export_field(&dir)?;
++            let dir = match lightcraft_aros_platform::export_field(&dir) { Ok(dir) => dir, Err(e) => return Some(Err(e)) };
+             // stored settings: a depth the format lacks (saved before #1952) opens at the format's own
+             let opts = lightcraft_engine::export::ExportOptions::from_json(&lightcraft_engine::export::ExportOptions::known_keys_only(&prev));
+             // no previous export: 2048 px long edge; a previous full-size export: full size

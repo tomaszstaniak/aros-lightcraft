@@ -1,0 +1,27 @@
+{
+  "repositories": {
+    "lightcraft": {
+      "url": "https://github.com/storytold/lightcraft.git",
+      "commit": "23e181283cb448205d865e8cd288b56afe987986",
+      "tag": "v0.13.0",
+      "license": "MIT OR Apache-2.0",
+      "role": "build source; patches/lightcraft/series applies in order",
+      "port_commit": "168794820451eae757ad62406b9597cfcdbf1297"
+    },
+    "egui-aros": {
+      "url": "https://github.com/tomaszstaniak/egui-aros.git",
+      "commit": "794d6825cde0838fa04584fbc2124c882755ebdb",
+      "license": "MIT OR Apache-2.0",
+      "role": "shared GUI integration; egui 0.36.2; consume via vendor tooling, never copy a frontend"
+    }
+  },
+  "build_inputs": {
+    "rust_aros_commit": "7b00bb2aab0622788e60601f39f5cf79b63c3509",
+    "aros_sdk_source_commit": "5376f09bc1ed0c36a12fbb096406013f8a046e89",
+    "rustc_commit": "0dfb098f3aeecbe38c2566ca090193280e7349e7",
+    "target": "x86_64 ABIv11",
+    "path_mode": "-nix",
+    "default_gui_renderer": "CPU",
+    "default_image_compute": "CPU"
+  }
+}

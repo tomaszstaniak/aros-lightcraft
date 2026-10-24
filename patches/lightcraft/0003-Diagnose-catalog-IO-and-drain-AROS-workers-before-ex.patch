@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: LightCraft AROS port <lightcraft-aros@invalid>
+Date: Sat, 24 Oct 2026 01:59:56 +0200
+Subject: [PATCH] Diagnose catalog IO and drain AROS workers before exit
+
+---
+ apps/lightcraft-aros/src/native.rs |  4 ++--
+ crates/catalog/src/store.rs        | 22 +++++++++++++---------
+ crates/preview/src/lib.rs          |  5 +++++
+ 3 files changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/apps/lightcraft-aros/src/native.rs b/apps/lightcraft-aros/src/native.rs
+index 6a0d4216a97882e5fcfe64bbc1e7b6a39c5e196d..456e4a0fdee0401c378ed13b5c186b36a3d12350 100644
+--- a/apps/lightcraft-aros/src/native.rs
++++ b/apps/lightcraft-aros/src/native.rs
+@@ -169,7 +169,7 @@ pub fn main() -> std::process::ExitCode {
+     let quiesced = lightcraft_workers::wait(Duration::from_secs(30));
+     line(&format!("shutdown: detached_workers={} quiesced={quiesced}", lightcraft_workers::active()));
+     if !quiesced {
+-        error("detached background work did not stop; global Rayon is kept alive until it finishes", startup.workbench);
++        line("shutdown: waiting for CPU jobs to finish; global Rayon remains alive");
+     }
+     while !lightcraft_workers::wait(Duration::from_secs(1)) {
+         std::thread::yield_now();
+@@ -387,7 +387,7 @@ fn run(opts: Options) -> Result<(), String> {
+     saved?;
+     closed?;
+     if !stopped {
+-        return Err("background workers did not stop within ten seconds".into());
++        line("shutdown: renderer jobs continue draining before process exit");
+     }
+     if host.failed {
+         return Err("one or more scripted operations failed (see report)".into());
+diff --git a/crates/catalog/src/store.rs b/crates/catalog/src/store.rs
+index 553eb241f1fcb8cb0de5ef07498ca1b6d84dceb4..f75d62db9a1085e7c66da4bf4dc7d5b4b964b795 100644
+--- a/crates/catalog/src/store.rs
++++ b/crates/catalog/src/store.rs
+@@ -83,6 +83,10 @@ fn create_staging(tmp: &std::path::Path) -> io::Result<std::fs::File> {
+     std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)
+ }
+ 
++fn context(op: &str, path: &Path, e: io::Error) -> io::Error {
++    io::Error::new(e.kind(), format!("{op} {}: {e}", path.display()))
++}
++
+ impl Store for FsStore {
+     fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
+         match std::fs::read(self.path(name)) {
+@@ -99,11 +103,11 @@ impl Store for FsStore {
+         }
+         let tmp = self.path(&format!("{name}.tmp"));
+         {
+-            let mut f = create_staging(&tmp)?;
+-            f.write_all(data)?;
+-            f.sync_all()?;
++            let mut f = create_staging(&tmp).map_err(|e| context("create staging", &tmp, e))?;
++            f.write_all(data).map_err(|e| context("write staging", &tmp, e))?;
++            f.sync_all().map_err(|e| context("sync staging", &tmp, e))?;
+         }
+-        std::fs::rename(&tmp, self.path(name))?;
++        std::fs::rename(&tmp, self.path(name)).map_err(|e| context("rename staging", &self.path(name), e))?;
+         self.sync_dir();
+         Ok(())
+     }
+@@ -115,11 +119,11 @@ impl Store for FsStore {
+         }
+         let tmp = self.path(&format!("{name}.tmp"));
+         let written = (|| {
+-            let mut w = Counter { inner: io::BufWriter::with_capacity(1 << 20, create_staging(&tmp)?), n: 0 };
++            let mut w = Counter { inner: io::BufWriter::with_capacity(1 << 20, create_staging(&tmp).map_err(|e| context("create staging", &tmp, e))?), n: 0 };
+             fill(&mut w)?;
+             w.flush()?;
+             let f = w.inner.into_inner().map_err(|e| e.into_error())?;
+-            f.sync_all()?;
++            f.sync_all().map_err(|e| context("sync staging", &tmp, e))?;
+             Ok(w.n)
+         })();
+         let n = match written {
+@@ -129,7 +133,7 @@ impl Store for FsStore {
+                 return Err(e);
+             }
+         };
+-        std::fs::rename(&tmp, self.path(name))?;
++        std::fs::rename(&tmp, self.path(name)).map_err(|e| context("rename staging", &self.path(name), e))?;
+         self.sync_dir();
+         Ok(n)
+     }
+@@ -165,8 +169,8 @@ impl Store for FsStore {
+             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+             Err(e) => return Err(e),
+         };
+-        f.set_len(len)?;
+-        f.sync_all()
++        f.set_len(len).map_err(|e| context("truncate", &self.path(name), e))?;
++        f.sync_all().map_err(|e| context("sync truncated", &self.path(name), e))
+     }
+ 
+     fn describe(&self) -> String {
+diff --git a/crates/preview/src/lib.rs b/crates/preview/src/lib.rs
+index 2646f4123bba017c0bfca66dbfd1b06191e73ab6..4a41f9c7c804b47558dbe973237c1ac1fa6e1773 100644
+--- a/crates/preview/src/lib.rs
++++ b/crates/preview/src/lib.rs
+@@ -168,6 +168,11 @@ impl PreviewCache {
+     /// once the cache is dropped (its queue's sender with it).
+     #[cfg(not(target_arch = "wasm32"))]
+     fn start_writer(self: &Arc<Self>) -> Option<std::sync::mpsc::Sender<Write>> {
++        // During AROS shutdown a completed render may still publish its in-memory preview.
++        // Disk cache writes are disposable; the closing gate deliberately rejects new workers.
++        if cfg!(target_os = "aros") && lightcraft_workers::closing() {
++            return None;
++        }
+         let (tx, rx) = std::sync::mpsc::channel::<Write>();
+         let cache = Arc::downgrade(self);
+         let queued = self.queued.clone();

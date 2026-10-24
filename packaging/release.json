@@ -1,0 +1,32 @@
+{
+  "version": "0.13.0",
+  "title": "LightCraft 0.13.0 for AROS x86_64 ABIv11",
+  "label": "aros1",
+  "drawer": "LightCraft",
+  "archive": "LightCraft-0.13.0-aros1.x86_64-aros-v11.zip",
+  "source_archive": "LightCraft-0.13.0-aros1-source.zip",
+  "release_notes": "RELEASE-NOTES.md",
+  "stack": 16777216,
+  "icon_source": "work:assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png",
+  "lightcraft_notices": [
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "NOTICE",
+    "assets/ATTRIBUTION.md",
+    "assets/fonts/OFL-Inter.txt",
+    "assets/app-icon/LICENSE.txt"
+  ],
+  "notice_renames": {
+    "assets/app-icon/LICENSE.txt": "assets/app-icon/LICENSE-icon.txt"
+  },
+  "source_archive_exclude": [],
+  "build": {
+    "features": [
+      "--no-default-features"
+    ],
+    "lto": "fat",
+    "panic": "unwind",
+    "abi": "x86_64 ABIv11",
+    "strip": true
+  }
+}

@@ -1,0 +1,1480 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 01:11:49 +0200
+Subject: [PATCH] AROS: quiesce CPU workers and retire cached pools before
+ process exit
+
+The v11 CRT joins all pthreads, so static private Rayon pools cannot rely on process teardown. Retain AROS pool ownership explicitly and prevent recreation after shutdown. Track detached CPU producers, cancel application activity, wake paused face workers, wait for producer completion and only then terminate global Rayon. Preserve the upstream pool lifetime on other platforms.
+
+Normalize all supported CLI file arguments, including MCP and merge inputs/preview output. Preserve optional connect parsing. Disable MCP stdio and network model/data downloads explicitly on AROS until cancellable stdin/DNS shutdown can be validated; no blocking helper is launched for these unsupported operations.
+
+Verification: owned-pool, worker tracking, shared rendering parser, path conversion and CLI path regression tests pass on host (13 tests total); CPU dependency graph excludes GPU backends. Native final archive acceptance pending. No model, GPU or full upstream CI claim.
+---
+ Cargo.toml                                  |   2 +
+ apps/lightcraft-aros/Cargo.toml             |   1 +
+ apps/lightcraft-aros/src/native.rs          |  13 +-
+ apps/lightcraft-cli/Cargo.toml              |   4 +
+ apps/lightcraft-cli/src/main.rs             | 137 ++++++++++++++------
+ crates/engine/Cargo.toml                    |   1 +
+ crates/engine/src/apple_photos.rs           |   5 +-
+ crates/engine/src/availability.rs           |   3 +-
+ crates/engine/src/cmd/denoise.rs            |   3 +-
+ crates/engine/src/cmd/face_detect.rs        |   4 +-
+ crates/engine/src/cmd/geocode.rs            |   3 +-
+ crates/engine/src/cmd/previews.rs           |   7 +-
+ crates/engine/src/cmd/slideshow.rs          |   3 +-
+ crates/engine/src/demo.rs                   |  12 ++
+ crates/engine/src/denoise.rs                |   5 +-
+ crates/engine/src/devices.rs                |   3 +-
+ crates/engine/src/face_download.rs          |   3 +-
+ crates/engine/src/faces_worker.rs           |  45 ++++++-
+ crates/engine/src/focus_scan.rs             |   3 +-
+ crates/engine/src/lib.rs                    |   9 ++
+ crates/engine/src/library.rs                |   3 +-
+ crates/engine/src/model_download.rs         |   3 +-
+ crates/engine/src/owned_pool.rs             |  49 +++++++
+ crates/engine/src/segment/download.rs       |   3 +-
+ crates/engine/src/segment/worker.rs         |   3 +-
+ crates/fetch/src/lib.rs                     |   5 +
+ crates/gpu/Cargo.toml                       |   1 +
+ crates/gpu/src/lib.rs                       |   4 +-
+ crates/launch-config/src/lib.rs             |   2 +-
+ crates/mcp/Cargo.toml                       |   1 +
+ crates/mcp/src/progress.rs                  |  24 ++--
+ crates/preview/Cargo.toml                   |   1 +
+ crates/preview/src/lib.rs                   |   3 +-
+ crates/preview/src/pool.rs                  |   3 +-
+ crates/ui-egui/Cargo.toml                   |   1 +
+ crates/ui-egui/src/export_task.rs           |   7 +-
+ crates/ui-egui/src/import.rs                |  11 +-
+ crates/ui-egui/src/lightroom_import.rs      |   7 +-
+ crates/ui-egui/src/merge.rs                 |   3 +-
+ crates/ui-egui/src/panels/dialogs.rs        |   5 +-
+ crates/ui-egui/src/panels/layout_overlay.rs |   3 +-
+ crates/ui-egui/src/panels/left.rs           |   5 +-
+ crates/ui-egui/src/sync.rs                  |   4 +-
+ crates/ui-egui/src/tasks.rs                 |   3 +-
+ crates/workers/Cargo.toml                   |   7 +
+ crates/workers/src/lib.rs                   |  93 +++++++++++++
+ 46 files changed, 429 insertions(+), 91 deletions(-)
+ create mode 100644 crates/engine/src/owned_pool.rs
+ create mode 100644 crates/workers/Cargo.toml
+ create mode 100644 crates/workers/src/lib.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 995f15d06f294fc09dee1110f2cfd5595cf90225..e9b204a51436bbf46a95366a299ca0da48157021 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,6 +16,7 @@ craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-l
+ lightcraft-denoise-core = { path = "crates/denoise-core" }
+ lightcraft-denoise = { path = "crates/denoise", default-features = false }
+ lightcraft-geom = { path = "crates/geom" }
++lightcraft-workers = { path = "crates/workers" }
+ lightcraft-faces = { path = "crates/faces" }
+ lightcraft-sysmem = { path = "crates/sysmem" }
+ lightcraft-color = { path = "crates/color" }
+@@ -113,6 +114,7 @@ js-sys = "0.3"
+ web-sys = "0.3"
+ 
+ [workspace.lints.rust]
++unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("aros"))'] }
+ unsafe_code = "deny"
+ 
+ [workspace.lints.clippy]
+diff --git a/apps/lightcraft-aros/Cargo.toml b/apps/lightcraft-aros/Cargo.toml
+index 93f09d9188514dea56f0a965b6e43b0d9c293ee8..df77dcb9a6a7513230ab4778c1a0dd90cf73673c 100644
+--- a/apps/lightcraft-aros/Cargo.toml
++++ b/apps/lightcraft-aros/Cargo.toml
+@@ -10,6 +10,7 @@ workspace = true
+ name = "LightCraft"
+ path = "src/main.rs"
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ lightcraft-launch-config = { path = "../../crates/launch-config" }
+ lightcraft-aros-platform = { path = "../../crates/aros-platform" }
+ [target.'cfg(target_os = "aros")'.dependencies]
+diff --git a/apps/lightcraft-aros/src/native.rs b/apps/lightcraft-aros/src/native.rs
+index abc8aefe8d84b684916553bcbd9690bebfd1e5c1..6a0d4216a97882e5fcfe64bbc1e7b6a39c5e196d 100644
+--- a/apps/lightcraft-aros/src/native.rs
++++ b/apps/lightcraft-aros/src/native.rs
+@@ -165,6 +165,15 @@ pub fn main() -> std::process::ExitCode {
+     };
+     let result = run(opts);
+     // All app/session scopes have dropped before ending the global pool.
++    lightcraft_engine::shutdown_private_pools();
++    let quiesced = lightcraft_workers::wait(Duration::from_secs(30));
++    line(&format!("shutdown: detached_workers={} quiesced={quiesced}", lightcraft_workers::active()));
++    if !quiesced {
++        error("detached background work did not stop; global Rayon is kept alive until it finishes", startup.workbench);
++    }
++    while !lightcraft_workers::wait(Duration::from_secs(1)) {
++        std::thread::yield_now();
++    }
+     rayon_core::terminate_global_thread_pool();
+     match result {
+         Ok(()) => {
+@@ -368,10 +377,12 @@ fn run(opts: Options) -> Result<(), String> {
+         &mut host,
+     )
+     .map_err(|e| e.to_string());
++    host.app.session.activity.cancel_all();
++    lightcraft_workers::begin_shutdown();
+     let saved = serde_json::to_vec_pretty(&host.app.ui).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&prefs, b).map_err(|e| e.to_string()));
+     let closed = host.app.session.close_library().map_err(|e| e.to_string());
+     let stopped = host.app.shutdown(Duration::from_secs(10));
+-    line(&format!("shutdown: window closed; workers_stopped={stopped}"));
++    line(&format!("shutdown: window closed; render_workers_stopped={stopped}"));
+     result?;
+     saved?;
+     closed?;
+diff --git a/apps/lightcraft-cli/Cargo.toml b/apps/lightcraft-cli/Cargo.toml
+index ff7d5b44c67c05547ff8380975d4b5dc2bfec4c5..b2acec8a3c251fec89431badafe8eeddcd2b36a7 100644
+--- a/apps/lightcraft-cli/Cargo.toml
++++ b/apps/lightcraft-cli/Cargo.toml
+@@ -14,6 +14,7 @@ path = "src/main.rs"
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ lightcraft-launch-config = { path = "../../crates/launch-config" }
+ lightcraft-engine = { workspace = true }
+ lightcraft-denoise = { workspace = true }
+@@ -43,3 +44,6 @@ dhat-heap = ["dep:dhat"]
+ # Open HEIC/HEIF photos (the optional lightcraft-heif crate). Not default so distributors choose
+ # it (HEVC patents); build with `--features heif` to include it.
+ heif = ["lightcraft-codecs/heif"]
++
++[dev-dependencies]
++lightcraft-aros-platform = { path = "../../crates/aros-platform" }
+diff --git a/apps/lightcraft-cli/src/main.rs b/apps/lightcraft-cli/src/main.rs
+index b4f8d8058c727a44de4aa8e3e4d7dad7dfcc009c..efcb3775c7cdb1df0c1a031b79ea049a3ab78c81 100644
+--- a/apps/lightcraft-cli/src/main.rs
++++ b/apps/lightcraft-cli/src/main.rs
+@@ -161,45 +161,49 @@ fn main() -> ExitCode {
+         return ExitCode::FAILURE;
+     }
+     let args: Vec<String> = std::env::args().skip(1).collect();
+-    let (request, args) = match lightcraft_launch_config::Request::parse(&args, &[]) {
+-        Ok(v) => v,
+-        Err(e) => {
+-            eprintln!("configuration: {e}");
+-            return ExitCode::from(2);
+-        }
+-    };
+     #[cfg(target_os = "aros")]
+-    let args = match aros_paths(args) {
+-        Ok(a) => a,
+-        Err(e) => {
+-            eprintln!("path: {e}");
+-            return ExitCode::from(2);
+-        }
+-    };
+-    // AROS product is deliberately CPU-only. Other CLI builds retain their compiled compute capability.
+-    let caps = lightcraft_launch_config::Capabilities { gui_gpu: false, image_gpu: cfg!(all(feature = "gpu", not(target_os = "aros"))) };
+-    let modes = match request.resolve(caps) {
+-        Ok(v) => v,
+-        Err(e) => {
++    let args = {
++        let (request, args) = match lightcraft_launch_config::Request::parse(&args, &[]) {
++            Ok(v) => v,
++            Err(e) => {
++                eprintln!("configuration: {e}");
++                return ExitCode::from(2);
++            }
++        };
++        let args = match aros_paths(args) {
++            Ok(a) => a,
++            Err(e) => {
++                eprintln!("path: {e}");
++                return ExitCode::from(2);
++            }
++        };
++        // The AROS product is deliberately CPU-only.
++        let caps = lightcraft_launch_config::Capabilities { gui_gpu: false, image_gpu: false };
++        let modes = match request.resolve(caps) {
++            Ok(v) => v,
++            Err(e) => {
++                eprintln!(
++                    "GUI_RENDERER: requested={} actual=NOT_STARTED; IMAGE_COMPUTE: requested={} actual=NOT_STARTED; configuration: {e}",
++                    request.gui.name(),
++                    request.image.name()
++                );
++                return ExitCode::from(2);
++            }
++        };
++        for (key, mode) in [("GUI_RENDERER", &modes.gui), ("IMAGE_COMPUTE", &modes.image)] {
+             eprintln!(
+-                "GUI_RENDERER: requested={} actual=NOT_STARTED; IMAGE_COMPUTE: requested={} actual=NOT_STARTED; configuration: {e}",
+-                request.gui.name(),
+-                request.image.name()
++                "{key}: requested={} actual={}{}",
++                mode.requested.name(),
++                mode.actual.name(),
++                mode.reason.as_ref().map(|s| format!("; {s}")).unwrap_or_default()
+             );
+-            return ExitCode::from(2);
+         }
++        if modes.image.actual == lightcraft_launch_config::Mode::Cpu {
++            lightcraft_engine::gpu::require_cpu();
++        }
++
++        args
+     };
+-    for (key, mode) in [("GUI_RENDERER", &modes.gui), ("IMAGE_COMPUTE", &modes.image)] {
+-        eprintln!(
+-            "{key}: requested={} actual={}{}",
+-            mode.requested.name(),
+-            mode.actual.name(),
+-            mode.reason.as_ref().map(|s| format!("; {s}")).unwrap_or_default()
+-        );
+-    }
+-    if modes.image.actual == lightcraft_launch_config::Mode::Cpu {
+-        lightcraft_engine::gpu::require_cpu();
+-    }
+ 
+     let r = match args.first().map(String::as_str) {
+         Some("run") => run(&args[1..]),
+@@ -217,13 +221,22 @@ fn main() -> ExitCode {
+             Ok(())
+         }
+         Some("--help" | "-h" | "help") | None => {
+-            print!("{USAGE}\n{}\n", lightcraft_launch_config::HELP);
++            print!("{USAGE}");
++            #[cfg(target_os = "aros")]
++            println!("\n{}", lightcraft_launch_config::HELP);
+             Ok(())
+         }
+         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
+     };
+     #[cfg(target_os = "aros")]
+-    rayon_core::terminate_global_thread_pool();
++    {
++        lightcraft_workers::begin_shutdown();
++        lightcraft_engine::shutdown_private_pools();
++        while !lightcraft_workers::wait(std::time::Duration::from_secs(1)) {
++            std::thread::yield_now();
++        }
++        rayon_core::terminate_global_thread_pool();
++    }
+     match r {
+         Ok(()) => ExitCode::SUCCESS,
+         Err(e) => {
+@@ -234,13 +247,25 @@ fn main() -> ExitCode {
+ }
+ 
+ /// Convert path-bearing launch arguments before POSIX lexical code sees DOS names.
+-#[cfg(target_os = "aros")]
++#[cfg(any(target_os = "aros", test))]
+ fn aros_paths(mut args: Vec<String>) -> Result<Vec<String>, String> {
+     let command = args.first().cloned().unwrap_or_default();
+     let mut path_next = false;
+     let mut skip_next = false;
+     let mut positional = 0;
++    let mut connect_next = false;
+     for arg in args.iter_mut().skip(1) {
++        if connect_next {
++            connect_next = false;
++            if arg.contains(':') || arg.chars().all(|c| c.is_ascii_digit()) {
++                continue;
++            }
++        }
++        if arg == "--connect" {
++            connect_next = true;
++            continue;
++        }
++
+         if path_next && arg == "-" {
+             path_next = false;
+         } else if path_next {
+@@ -248,7 +273,10 @@ fn aros_paths(mut args: Vec<String>) -> Result<Vec<String>, String> {
+             path_next = false;
+         } else if skip_next {
+             skip_next = false;
+-        } else if matches!(arg.as_str(), "--library" | "--import" | "--script" | "--settings" | "--models" | "-o" | "--output") {
++        } else if matches!(
++            arg.as_str(),
++            "--library" | "--import" | "--script" | "--settings" | "--models" | "--preview" | "--out" | "-o" | "--output"
++        ) {
+             path_next = true;
+         } else if arg.starts_with('-') {
+             skip_next = matches!(
+@@ -265,8 +293,14 @@ fn aros_paths(mut args: Vec<String>) -> Result<Vec<String>, String> {
+                     | "--token-env"
+                     | "--run-on"
+                     | "--max-connections"
++                    | "--deghost"
++                    | "--bracket"
++                    | "--projection"
++                    | "--boundary-warp"
+             );
+-        } else if command == "render" && positional == 0 || matches!(command.as_str(), "snapshot" | "calibrate") {
++        } else if command == "merge" && positional == 0 {
++            positional += 1; // hdr/panorama mode, not a file
++        } else if command == "render" && positional == 0 || matches!(command.as_str(), "snapshot" | "calibrate" | "mcp" | "merge") {
+             *arg = lightcraft_aros_platform::absolute(arg)?.to_str().ok_or("path is not UTF-8")?.to_string();
+             positional += 1;
+         }
+@@ -1111,3 +1145,28 @@ fn denoise_serve(args: &[String]) -> Result<(), String> {
+ fn denoise_serve(_: &[String]) -> Result<(), String> {
+     Err("denoise-serve: this build has no denoise support (build with the `denoise` feature)".into())
+ }
++
++#[cfg(test)]
++mod aros_launch_tests {
++    use super::aros_paths;
++    fn args(s: &[&str]) -> Vec<String> {
++        s.iter().map(|s| s.to_string()).collect()
++    }
++    fn abs(s: &str) -> String {
++        std::path::absolute(s).unwrap().to_string_lossy().into_owned()
++    }
++    #[test]
++    fn mcp_files_and_optional_connect_are_classified_as_upstream() {
++        let a = aros_paths(args(&["mcp", "sample.png", "--library", "Library"])).unwrap();
++        assert_eq!(a, args(&["mcp", &abs("sample.png"), "--library", &abs("Library")]));
++        let a = aros_paths(args(&["mcp", "--connect", "sample.png"])).unwrap();
++        assert_eq!(a, args(&["mcp", "--connect", &abs("sample.png")]));
++        let a = aros_paths(args(&["mcp", "--connect", "127.0.0.1:7980"])).unwrap();
++        assert_eq!(a, args(&["mcp", "--connect", "127.0.0.1:7980"]));
++    }
++    #[test]
++    fn merge_inputs_preview_and_non_path_values_are_separate() {
++        let a = aros_paths(args(&["merge", "hdr", "a.dng", "--deghost", "low", "b.dng", "--preview", "preview.png"])).unwrap();
++        assert_eq!(a, args(&["merge", "hdr", &abs("a.dng"), "--deghost", "low", &abs("b.dng"), "--preview", &abs("preview.png")]));
++    }
++}
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+index 387a224a7f216b8b4fdb0ad24cf9347f49864913..1177f6075486e6bd2c6d40f244982d768d25c5cf 100644
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -9,6 +9,7 @@ description = "LightCraft engine: session, command registry, history, render job
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ # Paths stored in a Lightroom catalog are followed only to local files or the catalog's share.
+ craft-docpath = { workspace = true }
+ lightcraft-geom = { workspace = true }
+diff --git a/crates/engine/src/apple_photos.rs b/crates/engine/src/apple_photos.rs
+index 01394cd5f32f5090ef32f7d7f4aaa3c6ad67d1a2..8fdfb00f403b8cb23943fb32e0eb19927d5fdbfd 100644
+--- a/crates/engine/src/apple_photos.rs
++++ b/crates/engine/src/apple_photos.rs
+@@ -22,6 +22,7 @@
+ //! on macOS (installed by [`crate::Session::with_fs`]) and nothing elsewhere; tests use fakes and
+ //! never start osascript. Not in the web build.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ use std::sync::{Arc, Mutex, PoisonError};
+ use std::time::Duration;
+@@ -579,7 +580,7 @@ fn launch(runner: &Runner, job: &Arc<ImportJob>, paths: Vec<String>, album: Stri
+         return;
+     }
+     let (r, j) = (runner.clone(), job.clone());
+-    let started = std::thread::Builder::new().name("apple-photos".into()).spawn(move || {
++    let started = std::thread::Builder::new().name("apple-photos".into()).spawn_tracked(move || {
+         let _row = row;
+         run_to_completion(&r, &j, &paths, &album)
+     });
+@@ -738,7 +739,7 @@ pub fn osascript() -> Runner {
+             .map_err(|e| RunError::Spawn(e.to_string()))?;
+         // read both pipes while it runs: a long list of ids must not fill a pipe and stall it
+         fn drain(r: Option<impl Read + Send + 'static>) -> std::io::Result<std::thread::JoinHandle<String>> {
+-            std::thread::Builder::new().name("osascript-output".into()).spawn(move || {
++            std::thread::Builder::new().name("osascript-output".into()).spawn_tracked(move || {
+                 let mut buf = Vec::new();
+                 if let Some(mut r) = r {
+                     let _ = r.read_to_end(&mut buf);
+diff --git a/crates/engine/src/availability.rs b/crates/engine/src/availability.rs
+index 5976a3b2eec6f336c6c37aa907b8293fabc165dd..0e75660024fec872c2c49c98daa14135e2028d73 100644
+--- a/crates/engine/src/availability.rs
++++ b/crates/engine/src/availability.rs
+@@ -8,6 +8,7 @@
+ //! [`RECHECK`]. Everywhere else (CLI, MCP, tests) the default is synchronous: every question is a
+ //! fresh check, as before.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+ use std::time::Duration;
+@@ -126,7 +127,7 @@ impl Availability {
+ 
+     fn spawn_worker(&self, wake: Waker) {
+         let (state, probe) = (self.state.clone(), self.probe.clone());
+-        let started = std::thread::Builder::new().name("lc-availability".into()).spawn(move || {
++        let started = std::thread::Builder::new().name("lc-availability".into()).spawn_tracked(move || {
+             loop {
+                 let path = {
+                     let mut st = lock(&state);
+diff --git a/crates/engine/src/cmd/denoise.rs b/crates/engine/src/cmd/denoise.rs
+index 644d3b89ee53c6f4a2cb87df3e5226a7e69ddb3e..97eb0f5846d7c231da6bcacf69a3f52c4f761d8a 100644
+--- a/crates/engine/src/cmd/denoise.rs
++++ b/crates/engine/src/cmd/denoise.rs
+@@ -6,6 +6,7 @@
+ //! plus `settings.json` beside them. Model files, archives and manifests are hostile input: sizes are capped, ids are
+ //! validated before they become folder names, and nothing outside a model's own folder is ever touched.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::path::{Path, PathBuf};
+ use std::sync::{Arc, PoisonError, mpsc};
+ 
+@@ -259,7 +260,7 @@ fn start_install(s: &mut Session, src: PathBuf, id: String, activate: bool, veri
+     std::thread::Builder::new()
+         .name("denoise-model-install".into())
+         .stack_size(16 * 1024 * 1024)
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                 let _held = crate::memory::work_gate().acquire(512 * 1024 * 1024);
+                 install_file(&dir, &loader, run_on, at, C, &src, true, verified).map_err(|e| plain(&e))
+diff --git a/crates/engine/src/cmd/face_detect.rs b/crates/engine/src/cmd/face_detect.rs
+index f0cae2a36834bd10340d7df741e0d1b26bf7d3c2..657eaa1da174b19c89cc892f6dcb4c6745bbbc82 100644
+--- a/crates/engine/src/cmd/face_detect.rs
++++ b/crates/engine/src/cmd/face_detect.rs
+@@ -6,6 +6,8 @@
+ //! unnamed face regions in one undoable step; earlier detections are replaced, and regions that came from XMP (or
+ //! that you drew or named) are never touched. Like every region edit it is catalog-only: no sidecar is written.
+ 
++#[cfg(feature = "gpu")]
++use lightcraft_workers::BuilderExt as _;
+ use std::path::PathBuf;
+ use std::sync::{Arc, Mutex, PoisonError};
+ use std::time::Instant;
+@@ -148,7 +150,7 @@ pub(crate) fn offer_gpu(
+         let task = s.activity.start("facesGpu", "Checking the GPU for faces", crate::activity::Cancel::No);
+         task.detail(what);
+         set_gpu_state(what, GpuState { checking: true, ..GpuState::default() });
+-        let spawned = std::thread::Builder::new().name(format!("faces-gpu-{what}")).spawn(move || {
++        let spawned = std::thread::Builder::new().name(format!("faces-gpu-{what}")).spawn_tracked(move || {
+             let _task = task;
+             let gpu = match lightcraft_gpu::faces::accelerator() {
+                 Ok(gpu) => gpu,
+diff --git a/crates/engine/src/cmd/geocode.rs b/crates/engine/src/cmd/geocode.rs
+index c9ffb6b7e70cedfbc378e91bcfe26d7e9602fbfc..00f73434828210ce3a01aedb96bfe03d8831d640 100644
+--- a/crates/engine/src/cmd/geocode.rs
++++ b/crates/engine/src/cmd/geocode.rs
+@@ -5,6 +5,7 @@
+ //!
+ //! Sources: GeoNames dump readme (prose); own design.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::path::{Path, PathBuf};
+ use std::sync::{Arc, Mutex, PoisonError};
+ use std::time::SystemTime;
+@@ -253,7 +254,7 @@ mod download {
+         let handle = task.handle();
+         let thread_dir = dir.clone();
+         let thread_shared = shared.clone();
+-        let spawned = std::thread::Builder::new().name("place-names-download".into()).spawn(move || {
++        let spawned = std::thread::Builder::new().name("place-names-download".into()).spawn_tracked(move || {
+             // the activity row goes when the thread ends, however it ends
+             let _task = task;
+             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&base, &thread_dir, &cancel, &handle)));
+diff --git a/crates/engine/src/cmd/previews.rs b/crates/engine/src/cmd/previews.rs
+index bef292f8f7d6bd091a26acec251115b37d944817..273971db0bce8de9372586ce86df3fbcd4d09a39 100644
+--- a/crates/engine/src/cmd/previews.rs
++++ b/crates/engine/src/cmd/previews.rs
+@@ -3,6 +3,7 @@
+ //! Runs on a background thread (the app keeps working; progress / cancel by command, and a row in
+ //! the activity stack, issue #345), or inline with `wait` (CLI, MCP, tests).
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ 
+@@ -169,7 +170,7 @@ fn build(s: &mut Session, p: &Value) -> Result<Value> {
+         let st = state.clone();
+         std::thread::Builder::new()
+             .name("lc-build-previews".into())
+-            .spawn(move || run_all(jobs, &st, &task, lanes))
++            .spawn_tracked(move || run_all(jobs, &st, &task, lanes))
+             .map_err(|e| bad(C, format!("could not start: {e}")))?;
+     }
+     Ok(state.json())
+@@ -357,7 +358,7 @@ fn smart(s: &mut Session, p: &Value) -> Result<Value> {
+         let st = state.clone();
+         std::thread::Builder::new()
+             .name("lc-smart-previews".into())
+-            .spawn(move || {
++            .spawn_tracked(move || {
+                 if let Err(e) = smart_run(&dir, custom, discard, jobs, Some((&st, &task))) {
+                     log::warn!("{C}: {e}");
+                     *st.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
+@@ -395,7 +396,7 @@ pub(crate) fn refresh_stale_smart_previews(s: &mut Session) -> Option<std::threa
+         .collect();
+     std::thread::Builder::new()
+         .name("lc-smart-look".into())
+-        .spawn(move || refresh_stale(&dir, jobs))
++        .spawn_tracked(move || refresh_stale(&dir, jobs))
+         .map_err(|e| log::warn!("smart previews: could not start the look refresh: {e}"))
+         .ok()
+ }
+diff --git a/crates/engine/src/cmd/slideshow.rs b/crates/engine/src/cmd/slideshow.rs
+index 33ff76ec0f80191019bdbc54788c392d90264638..d0894ba7da581ad5d9dd80e0c0ff9def25bd739d 100644
+--- a/crates/engine/src/cmd/slideshow.rs
++++ b/crates/engine/src/cmd/slideshow.rs
+@@ -13,6 +13,7 @@
+ //! it is going.
+ 
+ use lightcraft_catalog::PhotoId;
++use lightcraft_workers::BuilderExt as _;
+ use serde_json::{Value, json};
+ 
+ use super::{CommandSpec, always, bad, cmd, str_param};
+@@ -362,7 +363,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
+         let r = run.clone();
+         std::thread::Builder::new()
+             .name("lc-slideshow-export".into())
+-            .spawn(move || crate::slideshow_export::run_to_end(prepared, &r, &task))
++            .spawn_tracked(move || crate::slideshow_export::run_to_end(prepared, &r, &task))
+             .map_err(|e| bad(C, format!("could not start: {e}")))?;
+     }
+     Ok(started)
+diff --git a/crates/engine/src/demo.rs b/crates/engine/src/demo.rs
+index 431eec763010723a66ef8051c4b621cd907fbe5f..797d7520303e6c0ab257413fff5293cc76b18af8 100644
+--- a/crates/engine/src/demo.rs
++++ b/crates/engine/src/demo.rs
+@@ -178,11 +178,23 @@ fn generate(render: impl FnOnce(Render) -> lightcraft_raster::Rgb32f + Send) ->
+ /// else the available parallelism), like the global pool they used before, without touching that
+ /// pool (asking it for its size starts it, which panics where its threads can't start); `None`
+ /// where this pool's threads can't start.
++#[cfg(not(target_os = "aros"))]
+ fn render_pool() -> Option<&'static rayon::ThreadPool> {
+     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+     POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().thread_name(|i| format!("lc-demo-scene-{i}")).build().ok()).as_ref()
+ }
+ 
++#[cfg(target_os = "aros")]
++static RENDER_POOL: crate::owned_pool::PoolSlot = crate::owned_pool::PoolSlot::new();
++#[cfg(target_os = "aros")]
++fn render_pool() -> Option<std::sync::Arc<rayon::ThreadPool>> {
++    RENDER_POOL.get(|| rayon::ThreadPoolBuilder::new().thread_name(|i| format!("lc-demo-scene-{i}")).build().ok())
++}
++#[cfg(target_os = "aros")]
++pub(crate) fn shutdown_pool() {
++    RENDER_POOL.shutdown();
++}
++
+ /// One scene at one size: generated once, then shared.
+ #[derive(Default)]
+ struct SceneSlot {
+diff --git a/crates/engine/src/denoise.rs b/crates/engine/src/denoise.rs
+index 591327b90c041d98bdfe9b83e8bd2deb1a98247d..c4a6f8bfb7fc92342cfd2f95d384b22198b4b58b 100644
+--- a/crates/engine/src/denoise.rs
++++ b/crates/engine/src/denoise.rs
+@@ -15,6 +15,7 @@
+ //! Failure is a message, never a panic: a file that is not a Bayer raw, a model that does not load, a full disk, a
+ //! panic inside the runtime and a cancelled job all end as an [`Outcome`] the pump records.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+@@ -315,7 +316,7 @@ fn set_up_card<T: Send + 'static, R>(
+     std::thread::Builder::new()
+         .name("denoise-gpu-setup".into())
+         .stack_size(STACK)
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(card)).unwrap_or_else(|_| Err("the GPU runner gave up".into()));
+             drop(ended);
+             let _ = tx.send(r);
+@@ -1400,7 +1401,7 @@ impl Session {
+             let outcome: Arc<Mutex<Option<Outcome>>> = Arc::new(Mutex::new(None));
+             let (key, product) = (spec.key.clone(), spec.product.clone());
+             let (worker_progress, worker_outcome) = (progress.clone(), outcome.clone());
+-            let started = std::thread::Builder::new().name("denoise".into()).stack_size(STACK).spawn(move || {
++            let started = std::thread::Builder::new().name("denoise".into()).stack_size(STACK).spawn_tracked(move || {
+                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make_product(&spec, Some(&worker_progress))));
+                 let o = match result {
+                     Ok(Ok(_)) => Outcome::Done,
+diff --git a/crates/engine/src/devices.rs b/crates/engine/src/devices.rs
+index 366cb5273fd0b2c479e3319d42fcf91f9a1de174..4199b61a409ee4a8a831419635b67e78250b5899 100644
+--- a/crates/engine/src/devices.rs
++++ b/crates/engine/src/devices.rs
+@@ -8,6 +8,7 @@
+ //! hook, which the UI uses to repaint, so hot-plugged cards still appear. [`devices_now`] scans
+ //! synchronously for explicit requests (`library.devices`, Add from Device without a path).
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+@@ -93,7 +94,7 @@ impl DeviceWatch {
+             s.refreshing = true;
+             let me = self.clone();
+             // the scan runs without the state lock; `get` only ever waits for a list clone
+-            let spawned = std::thread::Builder::new().name("lightcraft-devices".into()).spawn(move || {
++            let spawned = std::thread::Builder::new().name("lightcraft-devices".into()).spawn_tracked(move || {
+                 let list = (me.scanner)();
+                 me.store(list);
+             });
+diff --git a/crates/engine/src/face_download.rs b/crates/engine/src/face_download.rs
+index f5d0dd5fcb4936965e7fc5ddd358a8c9b8a9d245..8d2442572f48e9aa6d9357b04eb2738100d51c91 100644
+--- a/crates/engine/src/face_download.rs
++++ b/crates/engine/src/face_download.rs
+@@ -9,6 +9,7 @@
+ //! Failure is a message, never a panic: no network, a stalled or truncated transfer, a full disk, a file that is not the
+ //! one expected, and a panic inside the thread itself all end as [`State::Failed`].
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -93,7 +94,7 @@ impl Downloads {
+         let id = spec.id.clone();
+         std::thread::Builder::new()
+             .name("face-model-download".into())
+-            .spawn(move || {
++            .spawn_tracked(move || {
+                 // the row goes when the thread ends, however it ends
+                 let _task = task;
+                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&spec, spec.base(), &staging, &worker)));
+diff --git a/crates/engine/src/faces_worker.rs b/crates/engine/src/faces_worker.rs
+index 5c9d20a5faaca5e4b6ff07cb47d0c32b5d2af9df..b82fc76e8e7c08f990b73230458d0246b252a4e6 100644
+--- a/crates/engine/src/faces_worker.rs
++++ b/crates/engine/src/faces_worker.rs
+@@ -6,6 +6,7 @@
+ //! scan decodes each photo once. The session thread only prepares the job (which needs the catalog) and later ingests
+ //! the result, so the window never waits for a model.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::panic::{AssertUnwindSafe, catch_unwind};
+ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+ use std::sync::mpsc::{Receiver, Sender, channel};
+@@ -130,7 +131,7 @@ fn pool_threads_for(cores: usize, pace: Pace, cap: Option<usize>) -> usize {
+ /// How much of the GPU face models may take at `pace`: face model runs at once, and the share of the time it may be
+ /// busy. Paused or light: one run at a time, busy a quarter of the time (the user is working, and the window renders
+ /// on the same GPU); normal: two at once, busy most of the time; full: as fast as it goes.
+-#[cfg(any(feature = "gpu", test))]
++#[cfg(feature = "gpu")]
+ pub(crate) fn gpu_pace(pace: Pace) -> (usize, f32) {
+     match pace {
+         Pace::Pause | Pace::Light => (1, 0.25),
+@@ -308,6 +309,7 @@ impl Limit {
+ /// ([`pool_threads_for`]), made when first needed, whose idle threads cost nothing. rayon's global pool serves the
+ /// interactive work (the loupe, exports) and has no priorities, so scan work queued there would make a slider drag wait
+ /// behind it; here a light scan can use only two threads however large the machine is.
++#[cfg(not(target_os = "aros"))]
+ fn scan_pool(pace: Pace) -> Option<&'static rayon::ThreadPool> {
+     static LIGHT: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+     static NORMAL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+@@ -327,6 +329,30 @@ fn scan_pool(pace: Pace) -> Option<&'static rayon::ThreadPool> {
+     .as_ref()
+ }
+ 
++#[cfg(target_os = "aros")]
++static SCAN_POOLS: [crate::owned_pool::PoolSlot; 3] = [const { crate::owned_pool::PoolSlot::new() }; 3];
++#[cfg(target_os = "aros")]
++fn scan_pool(pace: Pace) -> Option<Arc<rayon::ThreadPool>> {
++    let (index, pace) = match pace {
++        Pace::Pause | Pace::Light => (0, Pace::Light),
++        Pace::Normal => (1, Pace::Normal),
++        Pace::Full => (2, Pace::Full),
++    };
++    SCAN_POOLS.get(index)?.get(|| {
++        rayon::ThreadPoolBuilder::new()
++            .num_threads(pool_threads_for(cores(), pace, cap_from_env()))
++            .thread_name(move |i| format!("lightcraft-faces-{}-{i}", pace as u8))
++            .build()
++            .ok()
++    })
++}
++#[cfg(target_os = "aros")]
++pub(crate) fn shutdown_pools() {
++    for pool in &SCAN_POOLS {
++        pool.shutdown();
++    }
++}
++
+ /// Run one photo on the pool for the pace, so its parallel parts stay there.
+ ///
+ /// It must NOT wait at the memory gate ([`crate::memory::work_gate`], which background decodes do): a job running on a
+@@ -358,13 +384,20 @@ impl Worker {
+         let mut started = 0;
+         for i in 0..threads.clamp(1, MAX_WORKERS) {
+             let (rx, tx, limit) = (job_rx.clone(), done_tx.clone(), limit.clone());
+-            let spawned = std::thread::Builder::new().name(format!("lightcraft-faces-{i}")).spawn(move || {
++            let spawned = std::thread::Builder::new().name(format!("lightcraft-faces-{i}")).spawn_tracked(move || {
+                 loop {
+                     // the lock is held only while waiting for a job, never while working on one; the threads end when
+                     // the session (the only sender) is dropped
+                     let next = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                     let Ok((embedder, prepared)) = next else { break };
++                    if lightcraft_workers::closing() {
++                        break;
++                    }
+                     limit.enter();
++                    if lightcraft_workers::closing() {
++                        limit.leave();
++                        break;
++                    }
+                     let done = process_in_background(prepared, &embedder, limit.pace());
+                     limit.leave();
+                     if tx.send(done).is_err() {
+@@ -394,6 +427,14 @@ impl Worker {
+     }
+ }
+ 
++#[cfg(target_os = "aros")]
++impl Drop for Worker {
++    fn drop(&mut self) {
++        // Wake workers already waiting at a paused pace; dropping the sender alone cannot wake that gate.
++        self.limit.set(MAX_WORKERS, Pace::Full);
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/engine/src/focus_scan.rs b/crates/engine/src/focus_scan.rs
+index 6be63e7ebc68a1f5b4eb659b3b1c1e2b8cdb6dc5..249ba93c12fc772cfc6a8e49c1a14bb002ecbed0 100644
+--- a/crates/engine/src/focus_scan.rs
++++ b/crates/engine/src/focus_scan.rs
+@@ -20,6 +20,7 @@
+ //! - **Starts** by itself once per library opening (from `focus.pump`) when photos are left to look at, and on demand
+ //!   with `photo.readFocusPoints`.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+@@ -209,7 +210,7 @@ fn start(s: &mut Session, list: Vec<(PhotoId, String)>, pace: Pace) -> std::resu
+     let (worker_cancel, worker_pace) = (cancel.clone(), pace.clone());
+     std::thread::Builder::new()
+         .name("focus-points".into())
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             for (id, path) in list {
+                 loop {
+                     if worker_cancel.load(Ordering::Relaxed) {
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 323ed90ef4c71db18f80b7dfc0d1c0d4b589f2c9..f1db81945824e64fcbf139b4fe733b35fe274605 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -59,6 +59,8 @@ pub mod merge;
+ mod model_download;
+ pub mod open_path;
+ pub mod originals;
++#[cfg(any(target_os = "aros", test))]
++mod owned_pool;
+ mod pdf;
+ pub mod preset_import;
+ pub mod preset_luminar;
+@@ -1386,3 +1388,10 @@ mod tests_sync;
+ mod tests_view_follow;
+ #[cfg(test)]
+ mod tests_xmp;
++
++/// Retire cached AROS private pools after the app stops producing work, before ending Rayon globally.
++#[cfg(target_os = "aros")]
++pub fn shutdown_private_pools() {
++    demo::shutdown_pool();
++    faces_worker::shutdown_pools();
++}
+diff --git a/crates/engine/src/library.rs b/crates/engine/src/library.rs
+index a5071b4b35808fc00dcf1a643e9755b1613670f9..43eb1ceb70805e355b5ada657e25c35a9be559a7 100644
+--- a/crates/engine/src/library.rs
++++ b/crates/engine/src/library.rs
+@@ -21,6 +21,7 @@
+ //! grows (see [`lightcraft_catalog::SnapshotPolicy`]; written by a worker thread on native, see
+ //! [`lightcraft_catalog::journal`]) and on [`Session::close_library`].
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::path::{Path, PathBuf};
+ 
+ use lightcraft_catalog::{FsStore, Journal, LibraryLock, LoadReport, Store};
+@@ -357,7 +358,7 @@ impl Session {
+             }
+             let stop = std::sync::Arc::new(AtomicBool::new(false));
+             let task = self.activity.start("cache", "Tidying the thumbnail cache", crate::activity::Cancel::Flag(stop.clone()));
+-            let spawned = std::thread::Builder::new().name("lc-thumbs-tidy".into()).spawn(move || {
++            let spawned = std::thread::Builder::new().name("lc-thumbs-tidy".into()).spawn_tracked(move || {
+                 // the row stays while this runs (it is dropped with the closure, however that ends)
+                 let _row = task;
+                 if let Some(disk) = cache.disk() {
+diff --git a/crates/engine/src/model_download.rs b/crates/engine/src/model_download.rs
+index 96f5eb1c749298d4386a0f51ca86a80a0f690a36..e0937c1eaaad5ec6257230fc9288a5ff8bc71c78 100644
+--- a/crates/engine/src/model_download.rs
++++ b/crates/engine/src/model_download.rs
+@@ -9,6 +9,7 @@
+ //! Failure is a message, never a panic: no network, a stalled or truncated transfer, a full disk, a file that is not the
+ //! one expected, and a panic inside the thread itself all end as [`State::Failed`].
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -94,7 +95,7 @@ impl Downloads {
+         let id = spec.id.clone();
+         std::thread::Builder::new()
+             .name("denoise-model-download".into())
+-            .spawn(move || {
++            .spawn_tracked(move || {
+                 // the row goes when the thread ends, however it ends
+                 let _task = task;
+                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&spec, &spec.url, &staging, &worker)));
+diff --git a/crates/engine/src/owned_pool.rs b/crates/engine/src/owned_pool.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..15b7d918daf75daae958b6860ffaea10a17e8e86
+--- /dev/null
++++ b/crates/engine/src/owned_pool.rs
+@@ -0,0 +1,49 @@
++//! Explicit lifetime for cached private Rayon pools on platforms that join all pthreads.
++use std::sync::{Arc, Mutex};
++
++struct State {
++    initialized: bool,
++    stopped: bool,
++    pool: Option<Arc<rayon::ThreadPool>>,
++}
++pub(crate) struct PoolSlot(Mutex<State>);
++impl PoolSlot {
++    pub const fn new() -> Self {
++        Self(Mutex::new(State { initialized: false, stopped: false, pool: None }))
++    }
++    pub fn get(&self, create: impl FnOnce() -> Option<rayon::ThreadPool>) -> Option<Arc<rayon::ThreadPool>> {
++        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
++        if state.stopped {
++            return None;
++        }
++        if !state.initialized {
++            state.pool = create().map(Arc::new);
++            state.initialized = true;
++        }
++        state.pool.clone()
++    }
++    pub fn shutdown(&self) {
++        let pool = {
++            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
++            state.stopped = true;
++            state.pool.take()
++        };
++        drop(pool);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn shutdown_retires_pool_and_prevents_recreation() {
++        let slot = PoolSlot::new();
++        let pool = slot.get(|| rayon::ThreadPoolBuilder::new().num_threads(2).build().ok()).unwrap();
++        assert_eq!(pool.install(|| rayon::join(|| 17, || 25)), (17, 25));
++        slot.shutdown();
++        assert!(slot.get(|| panic!("retired pools must not be recreated")).is_none());
++        // Outstanding callers own their lease until the work ends; releasing the last lease drops the pool.
++        assert_eq!(Arc::strong_count(&pool), 1);
++        drop(pool);
++    }
++}
+diff --git a/crates/engine/src/segment/download.rs b/crates/engine/src/segment/download.rs
+index 57ba4f341f57df951af8dd705fa3b05a29de9fd7..da658fb469a8df9c702d0d46967461d71ed752d3 100644
+--- a/crates/engine/src/segment/download.rs
++++ b/crates/engine/src/segment/download.rs
+@@ -2,6 +2,7 @@
+ //! ever blocking: progress lives in atomics, messages behind a mutex only ever `try_lock`ed
+ //! by the session (the download thread holds it for a few instructions at a time).
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::path::PathBuf;
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex};
+@@ -126,7 +127,7 @@ impl Downloader {
+         task.detail(name);
+         task.progress(0, s.total.load(Ordering::SeqCst));
+         let guard = Running(s.clone());
+-        let spawned = std::thread::Builder::new().name("sam3-download".into()).spawn(move || {
++        let spawned = std::thread::Builder::new().name("sam3-download".into()).spawn_tracked(move || {
+             let s = guard.0.clone();
+             let mut last_file = String::new();
+             let mut on_progress = |p: &Progress| {
+diff --git a/crates/engine/src/segment/worker.rs b/crates/engine/src/segment/worker.rs
+index efbb1c21c4851ea31a668efccb23e33e2df261bf..2ff3ea55695675e85b6f69803421ddf4cec92956 100644
+--- a/crates/engine/src/segment/worker.rs
++++ b/crates/engine/src/segment/worker.rs
+@@ -15,6 +15,7 @@
+ //! the next job uses it again. `LIGHTCRAFT_GPU=0` or `LIGHTCRAFT_GPU_BACKEND=off` keep the model on
+ //! the CPU from the start.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::VecDeque;
+ use std::panic::AssertUnwindSafe;
+ use std::path::PathBuf;
+@@ -237,7 +238,7 @@ impl Worker {
+         // (re)start the thread
+         let (tx, rx) = mpsc::channel();
+         let shared = self.shared.clone();
+-        match std::thread::Builder::new().name("sam3".into()).spawn(move || run(&rx, &shared, IDLE_UNLOAD, Placement::initial())) {
++        match std::thread::Builder::new().name("sam3".into()).spawn_tracked(move || run(&rx, &shared, IDLE_UNLOAD, Placement::initial())) {
+             Ok(t) => {
+                 self.thread = Some(t);
+                 self.tx = Some(tx.clone());
+diff --git a/crates/fetch/src/lib.rs b/crates/fetch/src/lib.rs
+index 12daff541fcec50b6389c5df66021a1b2fd8864a..31c8380b0422c82b75e73121db94053c036a7a32 100644
+--- a/crates/fetch/src/lib.rs
++++ b/crates/fetch/src/lib.rs
+@@ -173,6 +173,11 @@ fn download_source(
+     progress: &mut dyn FnMut(&Progress),
+     exact_urls: bool,
+ ) -> Result<(), DownloadError> {
++    if cfg!(target_os = "aros") {
++        return Err(DownloadError::Invalid(
++            "network model/data downloads are not available in this AROS build: resolver cancellation is not yet verified".into(),
++        ));
++    }
+     let total = validate_files(files)?;
+     if mirrors.len() > MAX_MIRRORS {
+         return Err(DownloadError::Invalid("too many mirrors".into()));
+diff --git a/crates/gpu/Cargo.toml b/crates/gpu/Cargo.toml
+index 964bd78b9413be946b809d8d56196f9c3efa496a..df35bcf4b2dcf352bd158481a43a0ab2e569206f 100644
+--- a/crates/gpu/Cargo.toml
++++ b/crates/gpu/Cargo.toml
+@@ -9,6 +9,7 @@ description = "LightCraft GPU develop pipeline: wgpu compute (WGSL) twin of the
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ lightcraft-denoise = { workspace = true, optional = true }
+ lightcraft-geom = { workspace = true }
+ lightcraft-color = { workspace = true }
+diff --git a/crates/gpu/src/lib.rs b/crates/gpu/src/lib.rs
+index 64fc3cc9652c2b547a0e323b78e24492634412c6..2fe26eaaa960f2499d11c2f9ad7f596880483024 100644
+--- a/crates/gpu/src/lib.rs
++++ b/crates/gpu/src/lib.rs
+@@ -22,6 +22,8 @@
+ #![forbid(unsafe_code)]
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+ 
++#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex};
+ 
+@@ -331,7 +333,7 @@ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
+ pub fn warm_up() {
+     #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+     if !env_disabled() && ENABLED.load(Ordering::Relaxed) && GPU.get().is_none() {
+-        let _ = std::thread::Builder::new().name("lc-gpu-init".into()).spawn(|| {
++        let _ = std::thread::Builder::new().name("lc-gpu-init".into()).spawn_tracked(|| {
+             let _ = device();
+         });
+     }
+diff --git a/crates/launch-config/src/lib.rs b/crates/launch-config/src/lib.rs
+index 99c7d23efcbb390b6ed24c95f310ca783728cc95..b0f5ae946b26013119c5172bf2eecd015ad921bb 100644
+--- a/crates/launch-config/src/lib.rs
++++ b/crates/launch-config/src/lib.rs
+@@ -96,7 +96,7 @@ impl Request {
+     }
+ }
+ 
+-pub const HELP: &str = "Rendering options (independent):\n  --gui-renderer CPU|AUTO|GPU\n  --image-compute CPU|AUTO|GPU\nCPU: no GPU initialization/probing (default). AUTO: try a supported GPU backend,\nelse CPU with a logged reason. GPU: require GPU, else a startup error.\nWorkbench ToolTypes: GUI_RENDERER=CPU, IMAGE_COMPUTE=CPU.\nPriority: explicit CLI > Workbench ToolType > CPU. Values are case-insensitive.\nThis AROS build is CPU-only for both paths.\nLegacy LIGHTCRAFT_GPU/LIGHTCRAFT_GPU_BACKEND/WGPU_BACKEND cannot enable GPU\nwhen CPU is selected; their values are recorded in the startup log.";
++pub const HELP: &str = "Rendering options (independent):\n  --gui-renderer CPU|AUTO|GPU\n  --image-compute CPU|AUTO|GPU\nCPU: no GPU initialization/probing (default). AUTO: try a supported GPU backend,\nelse CPU with a logged reason. GPU: require GPU, else a startup error.\nWorkbench ToolTypes: GUI_RENDERER=CPU, IMAGE_COMPUTE=CPU.\nPriority: explicit CLI > Workbench ToolType > CPU. Values are case-insensitive.\nThis AROS build is CPU-only for both paths. MCP stdio and network model/data downloads are disabled.\nLegacy LIGHTCRAFT_GPU/LIGHTCRAFT_GPU_BACKEND/WGPU_BACKEND cannot enable GPU\nwhen CPU is selected; their values are recorded in the startup log.";
+ 
+ #[cfg(test)]
+ mod tests {
+diff --git a/crates/mcp/Cargo.toml b/crates/mcp/Cargo.toml
+index b05dae56ff5fccab298fc6dee10239ddd47ed4b9..946e0d216af663e76b79c0515a2b341817e547f3 100644
+--- a/crates/mcp/Cargo.toml
++++ b/crates/mcp/Cargo.toml
+@@ -9,6 +9,7 @@ description = "LightCraft MCP server (L5): JSON-RPC 2.0 over stdio, driving a ru
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ lightcraft-engine = { workspace = true }
+ lightcraft-codecs = { workspace = true }
+ lightcraft-raster = { workspace = true }
+diff --git a/crates/mcp/src/progress.rs b/crates/mcp/src/progress.rs
+index 3f6a8deeceaf6f10cd1d2ba116e7ba5d7255f66f..8927528ce1b4eeded42808b8b06241082a34c9a7 100644
+--- a/crates/mcp/src/progress.rs
++++ b/crates/mcp/src/progress.rs
+@@ -1,6 +1,7 @@
+ //! Stdio progress and cancellation between photos. The backend keeps its session on the
+ //! serving thread; only stdin and stdout move to transport threads. Other calls wait in order.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::collections::VecDeque;
+ use std::io::{BufRead, BufReader, Write};
+ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -53,20 +54,27 @@ impl Server {
+     /// stdin worker can remain blocked until process exit; it owns no backend or borrowed data.
+     /// Further calls are refused, including after EOF, so blocked readers cannot accumulate.
+     pub fn serve_stdio(&mut self, output: impl Write + Send) -> std::io::Result<()> {
++        if cfg!(target_os = "aros") {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::Unsupported,
++                "MCP stdio is not available in this AROS build: cancellable stdin shutdown is not implemented. Use run, render, snapshot, commands or controls.",
++            ));
++        }
+         static STARTED: AtomicBool = AtomicBool::new(false);
+         if STARTED.swap(true, Ordering::AcqRel) {
+             return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "MCP stdin already claimed"));
+         }
+         let (in_tx, in_rx) = std::sync::mpsc::channel();
+         let reader_tx = in_tx.clone();
+-        let reader = match std::thread::Builder::new().name("mcp-input".into()).spawn(move || read_input(BufReader::new(std::io::stdin()), reader_tx))
+-        {
+-            Ok(reader) => reader,
+-            Err(error) => {
+-                STARTED.store(false, Ordering::Release);
+-                return Err(error);
+-            }
+-        };
++        let reader =
++            match std::thread::Builder::new().name("mcp-input".into()).spawn_tracked(move || read_input(BufReader::new(std::io::stdin()), reader_tx))
++            {
++                Ok(reader) => reader,
++                Err(error) => {
++                    STARTED.store(false, Ordering::Release);
++                    return Err(error);
++                }
++            };
+         let served = self.serve_messages(in_rx, in_tx, output);
+         let read = if reader.is_finished() { reader.join().map_err(|_| std::io::Error::other("MCP input thread panicked")) } else { Ok(()) };
+         served.and(read)
+diff --git a/crates/preview/Cargo.toml b/crates/preview/Cargo.toml
+index 12e21b16964be833a889209257c67f44c396f96e..dbb0bd1f93fcf63acdc2ca03d5a3bc8b1bae50a9 100644
+--- a/crates/preview/Cargo.toml
++++ b/crates/preview/Cargo.toml
+@@ -9,6 +9,7 @@ description = "LightCraft preview cache: content hashing, memory LRU, disk thumb
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ lightcraft-raster = { workspace = true }
+ siphasher = { workspace = true }
+ jpeg-encoder = { workspace = true }
+diff --git a/crates/preview/src/lib.rs b/crates/preview/src/lib.rs
+index 14bd50a1b30e402ec4bf04fe4304fd5fd7debf96..2646f4123bba017c0bfca66dbfd1b06191e73ab6 100644
+--- a/crates/preview/src/lib.rs
++++ b/crates/preview/src/lib.rs
+@@ -12,6 +12,7 @@
+ #![forbid(unsafe_code)]
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+ 
++use lightcraft_workers::BuilderExt as _;
+ pub mod disk;
+ pub mod hash;
+ pub mod lru;
+@@ -170,7 +171,7 @@ impl PreviewCache {
+         let (tx, rx) = std::sync::mpsc::channel::<Write>();
+         let cache = Arc::downgrade(self);
+         let queued = self.queued.clone();
+-        let spawned = std::thread::Builder::new().name("lc-preview-write".into()).spawn(move || {
++        let spawned = std::thread::Builder::new().name("lc-preview-write".into()).spawn_tracked(move || {
+             for job in rx {
+                 if let Some(me) = cache.upgrade() {
+                     let current = me.generation.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+diff --git a/crates/preview/src/pool.rs b/crates/preview/src/pool.rs
+index 9e96646850116628d9fc651287d38387b2349164..c1b1ac5a3bfc1f62fcd25767b5440986e982f5a7 100644
+--- a/crates/preview/src/pool.rs
++++ b/crates/preview/src/pool.rs
+@@ -12,6 +12,7 @@
+ //! driver while the process exits crashes there): [`JobPool::shutdown`] and dropping the pool
+ //! discard the queued jobs and wait, bounded, for the running ones.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::hash::Hash;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::mpsc::{Receiver, Sender, channel};
+@@ -124,7 +125,7 @@ impl<S: Copy + Eq + Hash + Send + 'static, R: Send + 'static> JobPool<S, R> {
+             for i in 0..self.threads {
+                 let shared = self.shared.clone();
+                 let tx = self.tx.clone();
+-                let spawned = std::thread::Builder::new().name(format!("lc-job-{i}")).spawn(move || {
++                let spawned = std::thread::Builder::new().name(format!("lc-job-{i}")).spawn_tracked(move || {
+                     let _ended = Ended(&shared);
+                     while let Some(e) = take(&shared, true) {
+                         let t0 = std::time::Instant::now();
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 1ae33a03d757500794b92a0846378128c4dcfd6d..250b3cfc1c554466d9946ba93aba5e7cb2cf23d4 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -10,6 +10,7 @@ description = "LightCraft egui frontend (Lightroom-style UI); swappable — noth
+ workspace = true
+ 
+ [dependencies]
++lightcraft-workers = { workspace = true }
+ craft-ui = { workspace = true }
+ lightcraft-geom = { workspace = true }
+ lightcraft-meta = { workspace = true }
+diff --git a/crates/ui-egui/src/export_task.rs b/crates/ui-egui/src/export_task.rs
+index 1aec848209bb4700e18efeef19afe66490e2cad0..c354a904f8f9300c99f5b270310e48f239270c59 100644
+--- a/crates/ui-egui/src/export_task.rs
++++ b/crates/ui-egui/src/export_task.rs
+@@ -7,6 +7,7 @@
+ //! Needs [`crate::Services::write_shared`] (a thread-safe writer); without it (web) the batch runs
+ //! synchronously as before.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::mpsc::{Receiver, channel};
+ use std::sync::{Arc, Mutex};
+@@ -78,7 +79,7 @@ pub fn start(app: &mut LightcraftApp, items: Vec<PreparedExport>, opts: ExportOp
+         let _ = tx.send(r);
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::Builder::new().name("export".into()).spawn(work).map_err(|e| e.to_string())?;
++    std::thread::Builder::new().name("export".into()).spawn_tracked(work).map_err(|e| e.to_string())?;
+     #[cfg(target_arch = "wasm32")]
+     work();
+     app.export = Some(ExportTask { total, progress, cancel, rx, guard });
+@@ -123,7 +124,7 @@ pub fn start_contact_sheet(app: &mut LightcraftApp, params: &Value) -> Result<Va
+         let _ = tx.send(result.map(|files| (files, None, c.load(Ordering::Relaxed))));
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::Builder::new().name("contact-sheet".into()).spawn(work).map_err(|e| e.to_string())?;
++    std::thread::Builder::new().name("contact-sheet".into()).spawn_tracked(work).map_err(|e| e.to_string())?;
+     #[cfg(target_arch = "wasm32")]
+     work();
+     let row = app.session.activity.start("export", "Exporting contact sheet", Cancel::Flag(cancel.clone()));
+@@ -176,7 +177,7 @@ pub fn start_print(app: &mut LightcraftApp, params: &Value) -> Result<Value, Str
+         let _ = tx.send(result.map(|files| (files, None, c.load(Ordering::Relaxed))));
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::Builder::new().name("print".into()).spawn(work).map_err(|e| e.to_string())?;
++    std::thread::Builder::new().name("print".into()).spawn_tracked(work).map_err(|e| e.to_string())?;
+     #[cfg(target_arch = "wasm32")]
+     work();
+     let row = app.session.activity.start("export", "Printing to PDF", Cancel::Flag(cancel.clone()));
+diff --git a/crates/ui-egui/src/import.rs b/crates/ui-egui/src/import.rs
+index 323d8d902f7669cd916b8b24e98f9b3d8c511586..c2b8bd4891e4b67be15c2f94ec5c5e82100a6c1c 100644
+--- a/crates/ui-egui/src/import.rs
++++ b/crates/ui-egui/src/import.rs
+@@ -12,6 +12,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
+ use lightcraft_engine::import::{
+     ImportCandidate, ImportUprightMode, ImportWarning, ImportWarningCode, ScanInput, ScanOutput, ScanProgress, scan_with,
+ };
++use lightcraft_workers::BuilderExt as _;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{Value, json};
+ use std::sync::atomic::Ordering;
+@@ -366,7 +367,11 @@ impl ImportRun {
+             }
+             ctx.request_repaint();
+         };
+-        std::thread::Builder::new().name("lc-import".into()).spawn(work).map(|_| Runner::Thread(rx)).map_err(|e| format!("could not start: {e}"))
++        std::thread::Builder::new()
++            .name("lc-import".into())
++            .spawn_tracked(work)
++            .map(|_| Runner::Thread(rx))
++            .map_err(|e| format!("could not start: {e}"))
+     }
+ 
+     #[cfg(target_arch = "wasm32")]
+@@ -480,7 +485,7 @@ pub fn open(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value, String
+         let _ = tx.send(scan_with(input, &paths, &p));
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::spawn(job);
++    let _ = lightcraft_workers::spawn(job);
+     #[cfg(target_arch = "wasm32")]
+     job();
+     let guard = scan_guard(app, &progress, false);
+@@ -545,7 +550,7 @@ pub fn browse(app: &mut LightcraftApp, path: &str, subfolders: Option<bool>) ->
+         let _ = tx.send(scan_with(input, &files, &p));
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::spawn(job);
++    let _ = lightcraft_workers::spawn(job);
+     #[cfg(target_arch = "wasm32")]
+     job();
+     let guard = scan_guard(app, &progress, true);
+diff --git a/crates/ui-egui/src/lightroom_import.rs b/crates/ui-egui/src/lightroom_import.rs
+index 2bda28cf42daee7c0de852d0b685ee821ea4acde..f6eb8751569eacdcdfb3af27b2ed354e663d015c 100644
+--- a/crates/ui-egui/src/lightroom_import.rs
++++ b/crates/ui-egui/src/lightroom_import.rs
+@@ -4,6 +4,7 @@
+ //! removable or network drive.  This task keeps that work off the owner thread, commits prepared
+ //! data only on the owner thread, then finishes the archive index on a worker.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::path::PathBuf;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, mpsc};
+@@ -166,7 +167,7 @@ fn spawn_inspect(
+ ) -> Result<(), String> {
+     std::thread::Builder::new()
+         .name("lc-lightroom-inspect".into())
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             let result = lightcraft_engine::guard::catch("Lightroom inspect", || {
+                 lightcraft_engine::lightroom_catalog::read_with_progress(&path, &cancel, &progress.catalog_total, &progress.catalog_done)
+             })
+@@ -187,7 +188,7 @@ fn spawn_prepare(
+ ) -> Result<(), String> {
+     std::thread::Builder::new()
+         .name("lc-lightroom-import".into())
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             let result =
+                 lightcraft_engine::guard::catch("Lightroom import", || job.prepare(&cancel)).and_then(|r| r.map(Box::new).map_err(|e| e.to_string()));
+             if let Err(mpsc::SendError(Message::Prepared(Ok(prepared)))) = tx.send(Message::Prepared(result)) {
+@@ -209,7 +210,7 @@ fn spawn_finalize(
+ ) -> Result<(), String> {
+     std::thread::Builder::new()
+         .name("lc-lightroom-finalize".into())
+-        .spawn(move || {
++        .spawn_tracked(move || {
+             let result = lightcraft_engine::guard::catch("Lightroom archive finalization", || finalization.finish())
+                 .and_then(|r| r.map_err(|e| e.to_string()));
+             let _ = tx.send(Message::Finalized(result));
+diff --git a/crates/ui-egui/src/merge.rs b/crates/ui-egui/src/merge.rs
+index 61485a271046db60ff0e51e0dd03ab4809585f58..3baba5975e79b3a059118dcb47850e278f844818 100644
+--- a/crates/ui-egui/src/merge.rs
++++ b/crates/ui-egui/src/merge.rs
+@@ -7,6 +7,7 @@
+ //! in the activity stack); when it finishes, the result is written, imported and selected
+ //! ([`lightcraft_engine::Session::finish_merge`]).
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::mpsc::{Receiver, channel};
+ use std::sync::{Arc, Mutex};
+@@ -140,7 +141,7 @@ fn spawn(app: &LightcraftApp, options: &MergeDialog, ids: &[PhotoId], preview: b
+         let _ = tx.send(r);
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::Builder::new().name("photo-merge".into()).spawn(work).map_err(|e| e.to_string())?;
++    std::thread::Builder::new().name("photo-merge".into()).spawn_tracked(work).map_err(|e| e.to_string())?;
+     #[cfg(target_arch = "wasm32")]
+     work();
+     Ok(MergeTask { preview, job, options: options.clone(), progress, cancel, rx, guard: None })
+diff --git a/crates/ui-egui/src/panels/dialogs.rs b/crates/ui-egui/src/panels/dialogs.rs
+index 894ad2bd5ecb4319f64f606addf64286a8fa0ec8..b8c448ca2daf341986a82a959af839d26a98d2f1 100644
+--- a/crates/ui-egui/src/panels/dialogs.rs
++++ b/crates/ui-egui/src/panels/dialogs.rs
+@@ -1,6 +1,7 @@
+ //! Modal dialogs (new album, rename, create preset, choose settings to copy, export, about, shortcuts).
+ 
+ use lightcraft_develop::{ControlSpec, Section, SettingsGroup, Track};
++use lightcraft_workers::BuilderExt as _;
+ use serde_json::json;
+ 
+ use crate::LightcraftApp;
+@@ -45,7 +46,7 @@ pub(crate) fn rename_preview(
+         repaint.request_repaint();
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    if let Err(e) = std::thread::Builder::new().name("lc-rename-preview".into()).spawn(work) {
++    if let Err(e) = std::thread::Builder::new().name("lc-rename-preview".into()).spawn_tracked(work) {
+         log::warn!("rename preview: {e}");
+     }
+     #[cfg(target_arch = "wasm32")]
+@@ -109,7 +110,7 @@ fn watermark_preview(
+                     }
+                 };
+                 #[cfg(not(target_arch = "wasm32"))]
+-                if let Err(e) = std::thread::Builder::new().name("lc-watermark-preview".into()).spawn(work) {
++                if let Err(e) = std::thread::Builder::new().name("lc-watermark-preview".into()).spawn_tracked(work) {
+                     log::warn!("watermark preview: {e}");
+                 }
+                 #[cfg(target_arch = "wasm32")]
+diff --git a/crates/ui-egui/src/panels/layout_overlay.rs b/crates/ui-egui/src/panels/layout_overlay.rs
+index 9b4800d0f70cbd67c551a01b11b777cf28e24e65..ed68841a8aea897851e023eb3310a76137c9975b 100644
+--- a/crates/ui-egui/src/panels/layout_overlay.rs
++++ b/crates/ui-egui/src/panels/layout_overlay.rs
+@@ -9,6 +9,7 @@
+ //! be read says so at the canvas' bottom left. Graphics larger than [`MAX_SIDE`] are scaled down
+ //! once, premultiplied so transparent edges stay clean.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::{Arc, Mutex, PoisonError};
+ 
+ use egui::{Color32, Rect, pos2, vec2};
+@@ -95,7 +96,7 @@ fn start(ctx: &egui::Context, path: &str) -> Loaded {
+         repaint.request_repaint();
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    if let Err(e) = std::thread::Builder::new().name("lc-layout-image".into()).spawn(work) {
++    if let Err(e) = std::thread::Builder::new().name("lc-layout-image".into()).spawn_tracked(work) {
+         *loaded.lock().unwrap_or_else(PoisonError::into_inner) = Some(Err(format!("can't start reading the layout image: {e}")));
+     }
+     #[cfg(target_arch = "wasm32")]
+diff --git a/crates/ui-egui/src/panels/left.rs b/crates/ui-egui/src/panels/left.rs
+index 2c7d2642c9561c169fdcd42f3193eddb0b911bd3..83314b182c54f51f9b8b5f06c125233945fe8631 100644
+--- a/crates/ui-egui/src/panels/left.rs
++++ b/crates/ui-egui/src/panels/left.rs
+@@ -3,6 +3,7 @@
+ use egui::{Align2, Rect, Sense, pos2, vec2};
+ use lightcraft_catalog::{Album, AlbumId, FolderNode, KeywordNode};
+ use lightcraft_engine::LibrarySource;
++use lightcraft_workers::BuilderExt as _;
+ use serde_json::json;
+ 
+ use crate::LightcraftApp;
+@@ -850,7 +851,7 @@ fn missing_count(app: &mut LightcraftApp, ui: &mut egui::Ui) -> usize {
+             ctx.request_repaint();
+         };
+         #[cfg(not(target_arch = "wasm32"))]
+-        std::thread::spawn(work);
++        let _ = lightcraft_workers::spawn(work);
+         #[cfg(target_arch = "wasm32")]
+         work();
+         ui.data_mut(|d| d.insert_temp(id, job.clone()));
+@@ -1107,7 +1108,7 @@ pub(crate) fn fs_cached<T: Clone + Send + 'static>(ui: &egui::Ui, kind: &'static
+             repaint.request_repaint();
+         };
+         #[cfg(not(target_arch = "wasm32"))]
+-        if std::thread::Builder::new().name("lc-fs-list".into()).spawn(work).is_err() {
++        if std::thread::Builder::new().name("lc-fs-list".into()).spawn_tracked(work).is_err() {
+             cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
+             running.fetch_sub(1, Ordering::AcqRel);
+         }
+diff --git a/crates/ui-egui/src/sync.rs b/crates/ui-egui/src/sync.rs
+index 0473a38fa77d44f9edd4c67c36a7645cdcf82b4e..d852fed4c1df4a6b7a0966369ed44b7662f7aebc 100644
+--- a/crates/ui-egui/src/sync.rs
++++ b/crates/ui-egui/src/sync.rs
+@@ -55,7 +55,7 @@ pub fn open(app: &mut LightcraftApp, path: &str, name: &str, disk: bool) -> Resu
+         let _ = tx.send(scan_with(input, &p));
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::spawn(job);
++    let _ = lightcraft_workers::spawn(job);
+     #[cfg(target_arch = "wasm32")]
+     job();
+     let guard = app.session.activity.start("sync", "Looking for changes", Cancel::Flag(progress.files.cancel.clone()));
+@@ -270,7 +270,7 @@ pub fn confirm(app: &mut LightcraftApp, dlg: &Dialog) -> Result<Value, String> {
+         }
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::spawn(job);
++    let _ = lightcraft_workers::spawn(job);
+     #[cfg(target_arch = "wasm32")]
+     job();
+     let guard = app.session.activity.start("sync", "Synchronizing folder", Cancel::Flag(progress.files.cancel.clone()));
+diff --git a/crates/ui-egui/src/tasks.rs b/crates/ui-egui/src/tasks.rs
+index 86dc793811d1cf6e6b2a3681a249f718e4288f9c..10374ba30f5eac65d3ff6a33c6c11822b5b13c1b 100644
+--- a/crates/ui-egui/src/tasks.rs
++++ b/crates/ui-egui/src/tasks.rs
+@@ -4,6 +4,7 @@
+ //! answering. Imports, scans, exports and preview builds have their own tasks with progress. A task the user started
+ //! (Find Missing Photos) shows in the activity stack while it runs; quiet ones (the auto-import listing) don't.
+ 
++use lightcraft_workers::BuilderExt as _;
+ use std::sync::mpsc::{Receiver, TryRecvError, channel};
+ 
+ use crate::LightcraftApp;
+@@ -89,7 +90,7 @@ fn start<T: Send + 'static>(
+         }
+     };
+     #[cfg(not(target_arch = "wasm32"))]
+-    std::thread::Builder::new().name(format!("lc-task-{label}")).spawn(job).map_err(|e| format!("{label}: could not start: {e}"))?;
++    std::thread::Builder::new().name(format!("lc-task-{label}")).spawn_tracked(job).map_err(|e| format!("{label}: could not start: {e}"))?;
+     #[cfg(target_arch = "wasm32")]
+     job();
+     app.tasks.running.push(Task { label: label.to_string(), rx, _guard: guard });
+diff --git a/crates/workers/Cargo.toml b/crates/workers/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbbdf6ea357d858202a2b65b2a66a2086e88407b
+--- /dev/null
++++ b/crates/workers/Cargo.toml
+@@ -0,0 +1,7 @@
++[package]
++name = "lightcraft-workers"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++[lints]
++workspace = true
+diff --git a/crates/workers/src/lib.rs b/crates/workers/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..88ae76e297e7462b50a8d57133cf3c40c706dcef
+--- /dev/null
++++ b/crates/workers/src/lib.rs
+@@ -0,0 +1,93 @@
++//! Quiesce detached CPU producers before AROS joins threads and Rayon is terminated.
++#![forbid(unsafe_code)]
++use std::{
++    io,
++    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
++    thread::{Builder, JoinHandle},
++    time::{Duration, Instant},
++};
++static ACTIVE: AtomicUsize = AtomicUsize::new(0);
++static CLOSING: AtomicBool = AtomicBool::new(false);
++struct Token;
++impl Drop for Token {
++    fn drop(&mut self) {
++        ACTIVE.fetch_sub(1, Ordering::AcqRel);
++    }
++}
++pub trait BuilderExt {
++    fn spawn_tracked<F, T>(self, work: F) -> io::Result<JoinHandle<T>>
++    where
++        F: FnOnce() -> T + Send + 'static,
++        T: Send + 'static;
++}
++impl BuilderExt for Builder {
++    fn spawn_tracked<F, T>(self, work: F) -> io::Result<JoinHandle<T>>
++    where
++        F: FnOnce() -> T + Send + 'static,
++        T: Send + 'static,
++    {
++        if cfg!(any(target_os = "aros", test)) {
++            if closing() {
++                return Err(io::Error::other("LightCraft is closing; no new worker may start"));
++            }
++            ACTIVE.fetch_add(1, Ordering::AcqRel);
++            if closing() {
++                ACTIVE.fetch_sub(1, Ordering::AcqRel);
++                return Err(io::Error::other("LightCraft is closing"));
++            }
++            let token = Token;
++            self.spawn(move || {
++                let _token = token;
++                work()
++            })
++        } else {
++            self.spawn(work)
++        }
++    }
++}
++pub fn spawn<F, T>(work: F) -> io::Result<JoinHandle<T>>
++where
++    F: FnOnce() -> T + Send + 'static,
++    T: Send + 'static,
++{
++    Builder::new().spawn_tracked(work)
++}
++pub fn active() -> usize {
++    ACTIVE.load(Ordering::Acquire)
++}
++pub fn closing() -> bool {
++    CLOSING.load(Ordering::Acquire)
++}
++pub fn begin_shutdown() {
++    if cfg!(any(target_os = "aros", test)) {
++        CLOSING.store(true, Ordering::Release);
++    }
++}
++pub fn wait(timeout: Duration) -> bool {
++    let started = Instant::now();
++    while active() != 0 {
++        if started.elapsed() >= timeout {
++            return false;
++        }
++        std::thread::sleep(Duration::from_millis(10));
++    }
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn detached_work_is_counted_until_completion_and_shutdown_rejects_new_work() {
++        let (tx, rx) = std::sync::mpsc::channel();
++        let handle = std::thread::Builder::new().name("lifecycle-test".into()).spawn_tracked(move || rx.recv().unwrap()).unwrap();
++        assert!(!wait(std::time::Duration::from_millis(10)));
++        assert_eq!(active(), 1);
++        tx.send(7).unwrap();
++        assert_eq!(handle.join().unwrap(), 7);
++        assert!(wait(std::time::Duration::from_secs(1)));
++        begin_shutdown();
++        assert!(std::thread::Builder::new().spawn_tracked(|| ()).is_err());
++        assert!(closing());
++    }
++}
