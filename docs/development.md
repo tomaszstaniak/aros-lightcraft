@@ -5,6 +5,8 @@ updated: 2026-10-24
 
 # Build LightCraft for x86_64 AROS ABIv11
 
+To reproduce a published release, check out its release tag before preparing sources. Changed program bytes require a new release identifier.
+
 The source pin is LightCraft v0.13.0, `23e181283cb448205d865e8cd288b56afe987986`.
 Keep the upstream Cargo.lock. The build uses a separate source/lock copy under build/v11;
 path patches replace exact dependency versions there, never in the registry cache.

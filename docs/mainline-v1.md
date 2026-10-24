@@ -1,6 +1,6 @@
 # Mainline x86_64 ABIv1 build profile
 
-The released program is ABIv11. The separate v1 build uses the qualified official Rust nightly-2026-08-04 profile (compiler504869653f510b279c542e65ccd1ea9710c119ba), precompiled std and matching application libc0.2.190 bindings. CPU rendering and CPU image processing remain the defaults.
+The released program is ABIv11. The separate v1 build uses the official Rust nightly-2026-08-04 compiler with an experimental AROS standard-library integration (compiler504869653f510b279c542e65ccd1ea9710c119ba), precompiled std and matching application libc0.2.190 bindings. CPU rendering and CPU image processing remain the defaults.
 
 The qualified x86_64 SDK used for this build is an integration candidate, not a published toolchain release. This repository does not yet supply an independently installable v1 SDK.
 
