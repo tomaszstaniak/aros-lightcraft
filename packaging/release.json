@@ -1,14 +1,21 @@
 {
-  "version": "0.13.0",
-  "title": "LightCraft 0.13.0 for AROS x86_64 ABIv11",
-  "label": "aros",
+  "name": "LightCraft",
+  "version": "0.21.1",
+  "release": "0.21.1",
+  "upstream_version": "0.21.1 (tag v0.21.1, 361e3bc0)",
   "drawer": "LightCraft",
-  "archive": "LightCraft-0.13.0.x86_64-aros-v11.zip",
-  "source_archive": "LightCraft-0.13.0-source.x86_64-aros-v11.zip",
-  "release_notes": "RELEASE-NOTES.md",
   "stack": 16777216,
+  "tooltypes": [
+    "GUI_RENDERER=AUTO"
+  ],
   "icon_source": "work:assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png",
-  "lightcraft_notices": [
+  "source_archive": "LightCraft-0.21.1-source.zip",
+  "source_archive_exclude": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "project.json"
+  ],
+  "notices": [
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "NOTICE",
@@ -16,17 +23,72 @@
     "assets/fonts/OFL-Inter.txt",
     "assets/app-icon/LICENSE.txt"
   ],
-  "notice_renames": {
-    "assets/app-icon/LICENSE.txt": "assets/app-icon/LICENSE-icon.txt"
+  "targets": {
+    "aros-x86_64-abiv11-pc": {
+      "system": "AROS x86_64, ABIv11 distributions",
+      "sdk": "x86_64 ABIv11 SDK (deadwood2/AROS)",
+      "notice": "notices/aros-x86_64-abiv11-pc.txt",
+      "build": {
+        "lto": "fat",
+        "panic": "unwind",
+        "features": []
+      },
+      "limitations": [
+        "- OpenGL: AROS One 1.3 has only Mesa's software renderer, so AUTO uses CPU",
+        "  there. GPU works with it but draws a frame in seconds; use it only to try."
+      ]
+    },
+    "aros-x86_64-abiv1-pc": {
+      "system": "AROS x86_64, mainline ABIv1 (nightly 2026-11-06 or later)",
+      "sdk": "x86_64 mainline ABIv1 SDK of nightly 2026-11-10",
+      "notice": "notices/aros-x86_64-abiv1-pc.txt",
+      "build": {
+        "lto": "fat",
+        "panic": "abort",
+        "features": []
+      },
+      "limitations": [
+        "- AUTO uses CPU on this system: a program that has opened OpenGL leaves its",
+        "  log file in use after it ends, and the Shell it ran in stops redirecting",
+        "  the output of later programs (seen on nightly 2026-11-10). GPU opens",
+        "  OpenGL all the same; with VirGL in an emulator it drew correctly. Hardware",
+        "  OpenGL drivers have not been tested."
+      ]
+    },
+    "aros-aarch64-abiv1-raspi": {
+      "system": "AROS on Raspberry Pi, AArch64 ABIv1 (nightly 2026-11-06 or later)",
+      "sdk": "Raspberry Pi AArch64 ABIv1 SDK of nightly 2026-11-10",
+      "notice": "notices/aros-aarch64-abiv1-raspi.txt",
+      "build": {
+        "lto": "fat",
+        "panic": "abort",
+        "features": []
+      },
+      "limitations": [
+        "- OpenGL has not been tested on Pi hardware, so AUTO uses CPU. GPU opens",
+        "  OpenGL; save your work before you try it.",
+        "- Tested in an emulator only, not on a physical Raspberry Pi."
+      ]
+    }
   },
-  "source_archive_exclude": [],
-  "build": {
-    "features": [
-      "--no-default-features"
-    ],
-    "lto": "fat",
-    "panic": "unwind",
-    "abi": "x86_64 ABIv11",
-    "strip": true
-  }
+  "limitations": [
+    "- Developing and exporting run on the processor; the GPU setting has no",
+    "  effect. Large raw files and the generated demo photos take time on slow",
+    "  machines and in emulators.",
+    "- Not built in: AI Denoise, AI masks and HEIC/HEIF import. AVIF files can",
+    "  be exported but not imported.",
+    "- Use a library in one LightCraft (window or lightcraft-cli) at a time: the",
+    "  library cannot be locked against a second program on AROS.",
+    "- Links, other programs (Edit In, Open With) and folder windows are not",
+    "  opened from LightCraft. The low-disk warning is not shown.",
+    "- Chinese, Japanese and Korean fonts are not built in; such text shows as",
+    "  boxes.",
+    "- Changes of the whole window (scrolling, zooming, opening a dialog) redraw",
+    "  all of it; on slow machines and in emulators these follow with a delay.",
+    "- Not tested on AROS in this release: Workbench start, the file requesters,",
+    "  the clipboard, keyboard layouts other than the US one, printing, the",
+    "  slideshow, Lightroom import and the MCP server beyond its handshake.",
+    "- No automatic updates: install new versions with the AROS package manager",
+    "  or by unpacking the new archive."
+  ]
 }

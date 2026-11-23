@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:04:13 +0100
+Subject: [PATCH] AROS: no rayon pools kept in statics
+
+Three rayon pools live in statics and are never dropped: the face scan's pools by pace (engine faces_worker), the demo scenes' pool (engine demo) and the film grain's background tiles (pipeline crystal). Their idle threads wait for work forever, and AROS's pthread library waits for every thread when the process exits: LightCraft --memory on AROS x86_64 ABIv11 stopped after its last log line with two threads left (pool v11-1, run 20261123-155837-ee4071f9). On AROS the work goes to rayon's global pool instead, which the program ends before it exits (the patched rayon-core's terminate_global_thread_pool). With this and the next patch the same start ends (run 20261123-162223-1b8ca90a).
+---
+ crates/engine/src/demo.rs         | 7 +++++++
+ crates/engine/src/faces_worker.rs | 7 +++++++
+ crates/pipeline/src/crystal.rs    | 6 ++++++
+ 3 files changed, 20 insertions(+)
+
+diff --git a/crates/engine/src/demo.rs b/crates/engine/src/demo.rs
+index c89f29e0aa45287aff8e3dd3b0150c54ab304fe2..4ad755abba3acfc52febd07fd06544e5ee98b2ae 100644
+--- a/crates/engine/src/demo.rs
++++ b/crates/engine/src/demo.rs
+@@ -170,6 +170,8 @@ fn generate(render: impl FnOnce(Render) -> lightcraft_raster::Rgb32f + Send) ->
+     }
+     match render_pool() {
+         Some(pool) => pool.install(|| render(Render::Parallel)),
++        // AROS: on rayon's global pool, which the program ends before it exits (see render_pool)
++        None if cfg!(target_os = "aros") => render(Render::Parallel),
+         None => render(Render::Serial),
+     }
+ }
+@@ -179,6 +181,11 @@ fn generate(render: impl FnOnce(Render) -> lightcraft_raster::Rgb32f + Send) ->
+ /// pool (asking it for its size starts it, which panics where its threads can't start); `None`
+ /// where this pool's threads can't start.
+ fn render_pool() -> Option<&'static rayon::ThreadPool> {
++    // AROS: a pool kept in a static is never dropped, and its idle threads keep the process from
++    // ending (AROS's pthread library waits for every thread at exit).
++    if cfg!(target_os = "aros") {
++        return None;
++    }
+     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+     POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().thread_name(|i| format!("lc-demo-scene-{i}")).build().ok()).as_ref()
+ }
+diff --git a/crates/engine/src/faces_worker.rs b/crates/engine/src/faces_worker.rs
+index c9512f6cb0b2bc1063f81783c414666d357df262..b6195fcbafd094972be766fe3d3820f4e1407b8c 100644
+--- a/crates/engine/src/faces_worker.rs
++++ b/crates/engine/src/faces_worker.rs
+@@ -306,6 +306,13 @@ impl Limit {
+ /// interactive work (the loupe, exports) and has no priorities, so scan work queued there would make a slider drag wait
+ /// behind it; here a light scan can use only two threads however large the machine is.
+ fn scan_pool(pace: Pace) -> Option<&'static rayon::ThreadPool> {
++    // AROS: a pool kept in a static is never dropped, and its idle threads keep the process from
++    // ending (AROS's pthread library waits for every thread at exit). The photo's parallel work
++    // runs on rayon's global pool there, which the program ends before it exits.
++    if cfg!(target_os = "aros") {
++        let _ = pace;
++        return None;
++    }
+     static LIGHT: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+     static NORMAL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+     static FULL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+diff --git a/crates/pipeline/src/crystal.rs b/crates/pipeline/src/crystal.rs
+index 325329d3ff9f2563e3a451818699aa301e370d5e..e701f53ce41593aa909ecd32933a3de59e17ca82 100644
+--- a/crates/pipeline/src/crystal.rs
++++ b/crates/pipeline/src/crystal.rs
+@@ -986,6 +986,12 @@ fn spawn_in_background(draw: impl FnOnce() + Send + 'static) {
+ 
+ /// Half the cores, for tiles drawn in the background (`None`: the pool couldn't be made).
+ fn background_pool() -> Option<&'static rayon::ThreadPool> {
++    // AROS: a pool kept in a static is never dropped, and its idle threads keep the process from
++    // ending (AROS's pthread library waits for every thread at exit); the tiles go to rayon's
++    // global pool there, which the program ends before it exits.
++    if cfg!(target_os = "aros") {
++        return None;
++    }
+     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+     POOL.get_or_init(|| {
+         let n = std::thread::available_parallelism().map_or(2, |n| n.get()).div_ceil(2);

@@ -2,65 +2,39 @@
   "repositories": {
     "lightcraft": {
       "url": "https://github.com/storytold/lightcraft.git",
-      "commit": "23e181283cb448205d865e8cd288b56afe987986",
-      "tag": "v0.13.0",
+      "commit": "361e3bc0c838ffe5e5cea515b1fe5b71951989c6",
       "license": "MIT OR Apache-2.0",
-      "role": "build source; patches/lightcraft/series applies in order",
-      "port_commit": "66cb29e007251cd58a7ea2666687be518421424a"
+      "role": "build source (tag v0.21.1, 2026-11-12); patches/lightcraft/series applies in order",
+      "tag": "v0.21.1",
+      "note": "previous base: v0.13.0 23e181283cb448205d865e8cd288b56afe987986 (series 0001-0008 until 2026-11-23, in git history)"
+    },
+    "storytold-egui": {
+      "url": "https://github.com/storytold/egui.git",
+      "commit": "6d518fc799681571963842f95b55a6b68431b15a",
+      "license": "MIT OR Apache-2.0",
+      "role": "egui/eframe/egui-winit/egui_glow 0.37.0 as locked by LightCraft v0.21.1 (same revision as DeckCraft 0.18.1 and WordCraft 0.18.1); AROS patches via egui-aros",
+      "prepared_by": "egui-aros"
+    },
+    "storytold-winit": {
+      "url": "https://github.com/storytold/winit.git",
+      "commit": "a517b3846ee8457d84ee4975110bfda6797c44dc",
+      "license": "Apache-2.0",
+      "role": "winit 0.30.13 fork as locked by LightCraft v0.21.1; contrib AROS backend applied via egui-aros",
+      "prepared_by": "egui-aros"
     },
     "egui-aros": {
       "url": "https://github.com/tomaszstaniak/egui-aros.git",
-      "commit": "794d6825cde0838fa04584fbc2124c882755ebdb",
+      "commit": "d7abdeb29cbc718d712b2edbc0e206d0e12f72d2",
+      "branch": "egui-0.37",
       "license": "MIT OR Apache-2.0",
-      "role": "shared GUI integration; egui 0.36.2; consume via vendor tooling, never copy a frontend"
+      "role": "shared GUI integration (egui 0.37); consumed through its ea.py vendor, never copied",
+      "note": "branch egui-0.37 with the CPU renderer that repaints only changed tiles (2026-11-13)"
     },
-    "aros-v1-sdk": {
-      "url": "https://github.com/jonx/AROS.git",
-      "commit": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60",
-      "license": "APL-1.1; see per-file notices",
-      "role": "private official-profile SDK and coherent runtime reconstruction; patches/aros-v1-sdk/series",
-      "port_commit": "25bb338ec432e257a74c28d43dad4be523ecbb50"
-    }
-  },
-  "build_inputs": {
-    "rust_aros_commit": "7b00bb2aab0622788e60601f39f5cf79b63c3509",
-    "aros_sdk_source_commit": "5376f09bc1ed0c36a12fbb096406013f8a046e89",
-    "rustc_commit": "0dfb098f3aeecbe38c2566ca090193280e7349e7",
-    "target": "x86_64 ABIv11",
-    "path_mode": "-nix",
-    "default_gui_renderer": "CPU",
-    "default_image_compute": "CPU"
-  },
-  "build_profiles": {
-    "v11": {
-      "compiler": "0dfb098f3aeecbe38c2566ca090193280e7349e7",
-      "panic": "unwind",
-      "runtime": "accepted x86_64 ABIv11 release v0.13.0-aros1"
-    },
-    "v1": {
-      "compiler": "504869653f510b279c542e65ccd1ea9710c119ba",
-      "channel": "nightly-2026-08-04",
-      "panic": "abort",
-      "libc": "0.2.190 with versioned mainline bindings",
-      "runtime": "requires fd51/posixc0.41 and matching stdc/AROSTCP, a coherent pthread2 C SDK and -nix std",
-      "runtime_sources": {
-        "fd": "5839f00ec7f700d047c214961105c6564ad80b87",
-        "arostcp": "3ee5c32b3cdc375cd63563c5857dd8f6cb7e2cfc",
-        "crt": "0953c6861627e396f7901ce831e8b764cef8c335",
-        "rust": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60"
-      },
-      "path_mode": "-nix",
-      "default_features": false
-    }
-  },
-  "submissions": {
-    "mainline-libc-clock": {
-      "repository": "https://github.com/jonx/AROS.git",
-      "base": "2eb81b402b0d3de6d0b068ce74fdb6eb653f2d60",
-      "commit": "7a2ad2eb70bda23b5917ba730c89258ca45a5c80",
-      "series": "patches/mainline-libc-clock/series",
-      "status": "submitted draft; runtime unverified",
-      "url": "https://github.com/jonx/AROS/pull/1"
+    "craft-fonts": {
+      "url": "https://github.com/storytold/craft-fonts.git",
+      "commit": "b076417b5880bd4154bd22f00695b1d28c6bea83",
+      "license": "repository Apache-2.0; fonts under their own licences (OFL-1.1)",
+      "role": "font data, the commit LightCraft 0.21.1's release workflow embeds; the build leaves out the CJK and Korean faces (scripts/port.json craft_fonts)"
     }
   }
 }

@@ -29,3 +29,4 @@ __pycache__/
 
 # Assets, content, source datasets, fixtures and packaging sources are NOT
 # blanket-ignored. Record any collection-specific policy in the directory map.
+/local.*.json

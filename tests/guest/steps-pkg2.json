@@ -1,0 +1,6 @@
+[
+  {"frame": 20, "method": "engine.execute", "params": {"command": "library.state"}},
+  {"frame": 22, "method": "engine.execute", "params": {"command": "develop.get"}},
+  {"frame": 26, "screenshot": "/RAM/ctest/pkg-b.png"},
+  {"frame": 30, "quit": true}
+]

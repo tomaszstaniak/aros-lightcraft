@@ -1,0 +1,22 @@
+.KEY RUNDIR/A,MACHINE/A
+.BRA [
+.KET ]
+; LightCraft package check with apkg from a local index. Put into RAM:ctest: apkg (for this
+; system), lc.zip (the package), idx.json (a test index naming it), sample.png, steps-pkg.json,
+; steps-pkg2.json, run-use. Then: Execute RAM:ctest/run-pkg <results directory> <machine name>.
+; Everything stays under RAM:.
+FailAt 21
+Protect RAM:ctest/apkg +e
+MakeDir RAM:pk
+MakeDir RAM:pk/cache
+Copy RAM:ctest/lc.zip RAM:pk/cache/lightcraft.zip
+RAM:ctest/apkg --version >[RUNDIR]/apkg-version.txt
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json install lightcraft --yes >[RUNDIR]/install.txt
+Echo $RC >[RUNDIR]/install.rc
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json verify lightcraft >[RUNDIR]/verify.txt
+Echo $RC >[RUNDIR]/verify.rc
+Execute RAM:ctest/run-use [RUNDIR]
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json remove lightcraft --yes >[RUNDIR]/remove.txt
+Echo $RC >[RUNDIR]/remove.rc
+List RAM:pk ALL >[RUNDIR]/after-remove.txt
+Echo "done" >[RUNDIR]/pkg-done.txt

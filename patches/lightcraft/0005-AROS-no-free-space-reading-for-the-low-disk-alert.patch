@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:40:48 +0100
+Subject: [PATCH] AROS: no free-space reading for the low-disk alert
+
+fs4 reads a drive's free space through rustix, which has no AROS backend (statvfs and the other calls it binds are not in the AROS C library). On target_os = "aros" the engine does without fs4 and the alert reads nothing, as in the browser build: the alert does not show.
+---
+ crates/engine/Cargo.toml        | 5 ++++-
+ crates/engine/src/disk_space.rs | 5 +++--
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+index ab73adb42ee5c28056a8147debdf650988000860..3f69bee114bf84f1d88a9eb226030b5c22ccddb8 100644
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -51,7 +51,10 @@ lightcraft-segment = { workspace = true, optional = true }
+ lightcraft-fetch = { workspace = true }
+ # capture-time parsing for face recognition (native only)
+ chrono = { workspace = true }
+-# free space of the drive holding the preview cache (the low-disk alert; pure Rust: rustix / windows-sys)
++
++# free space of the drive holding the preview cache (the low-disk alert; pure Rust: rustix / windows-sys).
++# Not on AROS: rustix has no AROS backend (the alert is off there, as in the browser).
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+ fs4 = { workspace = true }
+ 
+ [features]
+diff --git a/crates/engine/src/disk_space.rs b/crates/engine/src/disk_space.rs
+index eb7f29e967055865b706bf4a81f8a95f49e9fd30..275b415c6cb966f683254d8b14d67b81791b2401 100644
+--- a/crates/engine/src/disk_space.rs
++++ b/crates/engine/src/disk_space.rs
+@@ -63,7 +63,7 @@ pub struct LowDiskAlert {
+ /// The free space of the drive holding `dir` (or its parent when `dir` isn't there yet). `None`
+ /// (logged) when it can't be read.
+ pub fn read(dir: &Path) -> Option<DiskSpace> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         let probe = if dir.exists() { dir } else { dir.parent().unwrap_or(dir) };
+         match fs4::statvfs(probe) {
+@@ -74,7 +74,8 @@ pub fn read(dir: &Path) -> Option<DiskSpace> {
+             }
+         }
+     }
+-    #[cfg(target_arch = "wasm32")]
++    // AROS: fs4 reads it through statvfs, which the AROS C library does not have.
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         let _ = dir;
+         None

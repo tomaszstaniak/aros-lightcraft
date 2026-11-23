@@ -1,0 +1,22 @@
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "develop.set", "params": {"values": {"light.exposure": 0.6}}}}
+{"method": "engine.execute", "params": {"command": "develop.get"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}
+{"method": "engine.execute", "params": {"command": "library.state"}}

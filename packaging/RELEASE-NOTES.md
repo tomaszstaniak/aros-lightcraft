@@ -1,28 +1,48 @@
-# LightCraft 0.13.0 for AROS
+# LightCraft 0.21.1 for AROS
 
-First AROS x86_64 ABIv11 release, with a CPU interface and CPU image processing.
+The AROS port of LightCraft 0.21.1, a photo library and raw developer. It keeps a catalogue of your photos, develops JPEG, PNG, TIFF, WebP, JPEG XL, PSD and camera raw files without changing the originals, and exports the results. It is built from the LightCraft 0.21.1 release (tag `v0.21.1`), for three AROS systems.
 
-Open images, adjust development settings, preview changes and export a copy. The catalog preserves non-destructive edits between sessions. PNG, JPEG, TIFF, WebP and JPEG XL import and export are included, along with RAW development and AVIF export.
+## Downloads
 
-The GUI_RENDERER and IMAGE_COMPUTE ToolTypes and command-line arguments select CPU, AUTO or GPU independently. Both default to CPU. This build contains CPU backends only; AUTO logs its CPU fallback and GPU reports an error.
-
-Unpack the program archive to a writable drawer and double-click LightCraft. Shell launches require `Stack 16777216`. Keep LightCraftData when upgrading. The package is also available as `lightcraft` through arospkg.
-
-## Feature availability
-
-LightCraft uses its own codec libraries. The following restrictions have different causes:
-
-| Feature | Reason in this release |
+| File | System |
 |---|---|
-| AVIF import | LightCraft 0.13.0 recognizes the format but has no decoder. AVIF export works. Import needs an upstream decoder integration. |
-| HEIF/HEIC | The optional upstream Rust decoder is not enabled. AROS compatibility still needs to be established. |
-| Neural denoise | The optional inference feature is not enabled. Upstream has a CPU implementation; dependencies, local models, memory and processing time need further work. CPU rendering does not require this feature to be disabled. |
-| SAM segmentation | The optional Candle-based feature is not enabled. Upstream supports CPU execution; model loading, memory use and processing time remain to be established on AROS. |
-| MCP stdio | The port explicitly blocks startup until the stdin reader can be interrupted and finished safely, including when the output connection breaks. |
-| Model downloads | The port explicitly blocks downloads pending verification of DNS cancellation and worker shutdown. This does not establish a lack of network support. |
+| `LightCraft-0.21.1-aros-x86_64-abiv11-pc.zip` | AROS x86_64, ABIv11 distributions |
+| `LightCraft-0.21.1-aros-x86_64-abiv1-pc.zip` | AROS x86_64, mainline ABIv1 (nightly 2026-11-06 or later) |
+| `LightCraft-0.21.1-aros-aarch64-abiv1-raspi.zip` | AROS on Raspberry Pi, AArch64 ABIv1 (mainline nightly 2026-11-06 or later) |
+| `LightCraft-0.21.1-source.zip` | Port sources, patches, pinned inputs and build recipe |
 
-MCP follow-up includes EOF, broken output and closing during a running tool, in addition to handshake and tool discovery. Denoise can first use a locally supplied model; download support can be addressed separately. HEIF uses an existing optional decoder, whereas AVIF import requires a decoder integration. See [feature status and follow-up work](https://github.com/tomaszstaniak/aros-lightcraft/blob/main/docs/features.md).
+Each package runs only on the system it was built for. `SHA256SUMS` lists the checksums. The packages can also be installed with the AROS package manager: `apkg install lightcraft`.
 
-This build requires x86_64 ABIv11. Native keyboard and clipboard conversion is limited to Latin-1. RAW compatibility varies by camera. Writing directly to the root of some volumes may fail; choose a destination drawer. No models are downloaded at startup.
+## What is new
 
-The source archive contains pinned upstream sources, patches, dependency inputs and the build recipe. Licenses and notices are included in the program archive.
+This release moves from LightCraft 0.13.0 to LightCraft 0.21.1. For the changes in the program itself, see the release notes of LightCraft upstream. On the AROS side:
+
+- A package for the Raspberry Pi, besides ABIv11 distributions and mainline x86_64.
+- The window is drawn by egui-aros, as in the other Craft programs: with the CPU only the parts of the window that changed are drawn again; in the emulators used for testing, a typical frame takes 0.015 to 0.03 s.
+- OpenGL can draw the window. The `GUI_RENDERER` ToolType in the icon, or `--gui-renderer` in a Shell, chooses `AUTO` (the default), `CPU` or `GPU`. `AUTO` uses OpenGL only when it is not Mesa's software renderer. The `IMAGE_COMPUTE` setting of 0.13.0 is gone: developing always runs on the processor.
+- The program takes the stack it needs itself; `Stack` is no longer needed before a Shell start.
+- `lightcraft-cli mcp`, the MCP server, is available.
+- Settings, the default library and the log file `LightCraft.log` are kept in `LightCraftData` in the program drawer, as in 0.13.0; an upgrade keeps the library.
+
+With the package manager: `apkg upgrade lightcraft`.
+
+## Installation
+
+Unpack the archive for your system anywhere writable and double-click LightCraft. From a Shell, run `LightCraft [--gui-renderer CPU|AUTO|GPU] [file or drawer]`; files and drawers named are imported. To upgrade by hand, unpack the new version to a new place and move `LightCraftData` into it. The archive also holds a `.arospkg` drawer with the arospkg description; after unpacking by hand it can be deleted.
+
+`LightCraft --version` and the first line of `LightCraft.log` name the build (`0.21.1` and the target); please include them when you report a problem.
+
+## Known limitations
+
+- Developing and exporting run on the processor; the GPU setting has no effect. Large raw files and the generated demo photos take time on slow machines and in emulators.
+- Not built in: AI Denoise, AI masks and HEIC/HEIF import. AVIF files can be exported but not imported.
+- Use a library in one LightCraft (window or `lightcraft-cli`) at a time: the library cannot be locked against a second program on AROS.
+- Links, other programs (Edit In, Open With) and folder windows are not opened from LightCraft. The low-disk warning is not shown.
+- Chinese, Japanese and Korean fonts are not built in; such text shows as boxes.
+- Changes of the whole window (scrolling, zooming, opening a dialog) redraw all of it; on slow machines and in emulators these follow with a delay.
+- Not tested on AROS in this release: Workbench start, the file requesters, the clipboard, keyboard layouts other than the US one, printing, the slideshow, Lightroom import and the MCP server beyond its handshake.
+- ABIv11: AROS One 1.3 has only Mesa's software renderer, so `AUTO` uses the CPU there. `GPU` works with it but draws a frame in seconds.
+- Mainline x86_64: `AUTO` uses the CPU, because a program that has opened OpenGL there leaves its log file in use after it ends (seen on nightly 2026-11-10). `GPU` still opens OpenGL; with VirGL in an emulator it drew correctly. Hardware OpenGL drivers have not been tested.
+- Raspberry Pi: tested in an emulator only. OpenGL has not been tested on Pi hardware, so `AUTO` uses the CPU; save your work before you try `GPU`.
+
+Licences and notices for LightCraft, the fonts built into it and everything else linked into it are in the `Licenses` drawer of each package.

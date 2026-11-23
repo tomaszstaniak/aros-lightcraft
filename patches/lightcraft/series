@@ -1,8 +1,9 @@
-0001-AROS-add-native-CPU-frontend-and-independent-launch-.patch
-0002-AROS-quiesce-CPU-workers-and-retire-cached-pools-bef.patch
-0003-Diagnose-catalog-IO-and-drain-AROS-workers-before-ex.patch
-0004-Wire-AROS-export-folder-requester-and-normalize-type.patch
-0005-Separate-native-export-fields-from-engine-paths-and-.patch
-0006-Propagate-native-export-field-errors-through-menu-co.patch
-0007-Cancel-AROS-procedural-generations-between-rows-with.patch
-0008-Report-the-selected-native-ABI-in-the-AROS-frontend.patch
+0001-AROS-build-without-the-self-updater.patch
+0002-AROS-the-develop-pipeline-runs-on-the-CPU-without-wg.patch
+0003-AROS-the-CLI-runs-its-command-on-its-own-stack-ends-.patch
+0004-AROS-host-LightCraft-in-an-Intuition-window-through-.patch
+0005-AROS-no-free-space-reading-for-the-low-disk-alert.patch
+0006-AROS-the-CLI-and-the-AROS-host-build-without-AI-Deno.patch
+0007-AROS-no-rayon-pools-kept-in-statics.patch
+0008-AROS-demo-photo-renders-can-be-stopped-when-the-prog.patch
+0009-AROS-no-unlocked-library-notice-at-every-start.patch

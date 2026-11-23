@@ -1,0 +1,910 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:37:35 +0100
+Subject: [PATCH] AROS host: LightCraft in an Intuition window through
+ egui-aros
+
+apps/lightcraft-aros runs the egui interface with egui-aros: winit and egui-winit for the window and input, the CPU renderer or OpenGL chosen at run time (--gui-renderer, ToolType GUI_RENDERER, the GUI_RENDERER variable; AUTO by default), ASL requesters for files and folders. It follows the desktop app's start-up: settings (upstream's prefs.rs, used as it is), the library chosen by --library, LIGHTCRAFT_LIBRARY, Settings or the default location, the library-problem window, files and drawers from the Shell or Workbench resolved by DOS and imported. Settings, the log and the default library live in LightCraftData beside the program (LIGHTCRAFT_CONFIG_DIR), the folder upstream's portable mode and the 0.13.0 port use. The program runs in the -nix path mode; requesters' DOS names are converted at the edge. Not on AROS: the control server, the lens database download, links and other programs. --screenshot and --test-steps (control requests at given frames) are test aids.
+---
+ apps/lightcraft-aros/Cargo.toml      |  45 ++
+ apps/lightcraft-aros/src/main.rs     | 649 +++++++++++++++++++++++++++
+ apps/lightcraft-aros/src/services.rs | 182 ++++++++
+ 3 files changed, 876 insertions(+)
+ create mode 100644 apps/lightcraft-aros/Cargo.toml
+ create mode 100644 apps/lightcraft-aros/src/main.rs
+ create mode 100644 apps/lightcraft-aros/src/services.rs
+
+diff --git a/apps/lightcraft-aros/Cargo.toml b/apps/lightcraft-aros/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..eef40f52f17a8f05dd69329ebef6cc75a73c50da
+--- /dev/null
++++ b/apps/lightcraft-aros/Cargo.toml
+@@ -0,0 +1,45 @@
++[package]
++name = "lightcraft-aros"
++description = "LightCraft on AROS: the egui interface in an Intuition window, through egui-aros"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++publish = false
++
++# The window, input, renderers, requesters, clipboard, character set and start-up data come
++# from egui-aros (shared by the Craft AROS ports); this crate has no `unsafe` code of its own.
++# Not the workspace lints: their `forbid(unsafe_code)` also rejects the start-up stack record
++# that aros-startup's minimum_stack! macro writes.
++
++[lints.clippy]
++dbg_macro = "warn"
++todo = "warn"
++
++[[bin]]
++name = "LightCraft"
++path = "src/main.rs"
++
++[features]
++default = ["denoise"]
++denoise = ["lightcraft-engine/denoise"]
++
++[dependencies]
++lightcraft-engine = { workspace = true }
++lightcraft-ui-egui = { workspace = true }
++lightcraft-codecs = { workspace = true }
++lightcraft-raster = { workspace = true }
++# stop_renders at shutdown: a demo photo still being generated would keep the process from ending
++lightcraft-scenes = { workspace = true }
++egui = { workspace = true }
++# Built from a pinned egui-aros commit with its crate patches: see the port's scripts/craft.py.
++# OpenGL is compiled in and chosen at run time (CPU, AUTO or GPU).
++egui-aros = { version = "0.1", features = ["asl", "glow"] }
++# Its minimum_stack! macro (egui_aros::startup is the same crate).
++aros-startup = "0.1"
++serde_json = { workspace = true }
++log = { workspace = true }
++
++# The patched rayon-core (see the port's crate patches) can end the global pool's threads, which
++# AROS's pthread library otherwise waits for forever when the program exits.
++[target.'cfg(target_os = "aros")'.dependencies]
++rayon-core = "1.13"
+diff --git a/apps/lightcraft-aros/src/main.rs b/apps/lightcraft-aros/src/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b315ffc92a5f45d50afcd74e6ab9b1e978b622f
+--- /dev/null
++++ b/apps/lightcraft-aros/src/main.rs
+@@ -0,0 +1,649 @@
++//! LightCraft on AROS.
++//!
++//! The egui interface (`lightcraft-ui-egui`) runs in an Intuition window through egui-aros: winit
++//! and egui-winit for the window and input, the CPU renderer or OpenGL for the pixels (chosen at
++//! run time: `--gui-renderer`, ToolType `GUI_RENDERER`), ASL for files and folders. The engine,
++//! the library and the file formats are the same as on the other platforms; this file and
++//! `services` follow the desktop app (apps/lightcraft/src/main.rs and session.rs). Not here: the
++//! localhost control server (`--control`), the self-updater, opening other programs and links,
++//! and GPU image processing (the develop pipeline runs on the CPU on AROS).
++//!
++//! Settings, the log and the default library are kept in `LightCraftData` in the program's drawer
++//! (or `LIGHTCRAFT_CONFIG_DIR`), the folder upstream's portable mode uses; 0.13.0 for AROS kept them
++//! there too. `--screenshot <file>` writes the window's pixels after `--screenshot-frames` frames
++//! and quits; `--test-steps <file.json>` sends control requests at given frames. Both are test
++//! aids for systems where the window cannot be watched or driven reliably.
++#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
++
++#[path = "../../lightcraft/src/prefs.rs"]
++#[allow(dead_code)]
++mod prefs;
++mod services;
++
++use std::path::PathBuf;
++use std::sync::Mutex;
++use std::sync::mpsc::{Receiver, Sender};
++use std::time::Duration;
++
++use egui_aros::{launch, startup};
++use lightcraft_engine::Session;
++use lightcraft_ui_egui::control::{ControlRequest, ControlResponse};
++use lightcraft_ui_egui::panels::library_problem::{Launch, LibraryProblem};
++use lightcraft_ui_egui::{LightcraftApp, UiState};
++use prefs::{PrefsWriter, load_prefs, prefs_path};
++
++/// The release name packaging gives (`--version`, the log), else the crate version.
++const RELEASE: &str = match option_env!("LIGHTCRAFT_RELEASE") {
++    Some(r) => r,
++    None => env!("CARGO_PKG_VERSION"),
++};
++const TARGET: &str = match option_env!("LIGHTCRAFT_BUILD_TARGET") {
++    Some(t) => t,
++    None => "aros",
++};
++
++/// How long quitting waits for work that is running (the desktop app waits 2 s for a GPU render;
++/// a CPU render on AROS takes longer).
++const EXIT_WAIT: Duration = Duration::from_secs(10);
++
++const USAGE: &str = "\
++LightCraft for AROS
++
++Usage: LightCraft [--gui-renderer CPU|AUTO|GPU] [--library <drawer>] [--memory] [--no-demo]
++                  [--window <w>x<h>] [--screenshot <file.png> [--screenshot-frames <n>]]
++                  [--test-steps <file.json>] [FILE or DRAWER...]
++
++  --library <drawer>  the library to open (default: the last one, else LightCraftData/Library)
++  --memory            a session in memory with the demo photos; nothing is written
++  --no-demo           a new library starts empty instead of with the demo photos
++  --version, -V       print the version and exit
++
++Files and drawers named are imported into the library.
++";
++
++struct Logger;
++
++impl log::Log for Logger {
++    fn enabled(&self, metadata: &log::Metadata) -> bool {
++        metadata.level() <= log::max_level()
++    }
++
++    fn log(&self, record: &log::Record) {
++        if self.enabled(record.metadata()) {
++            log_line(&format!("{} {}: {}", record.level(), record.target(), record.args()));
++        }
++    }
++
++    fn flush(&self) {}
++}
++
++static LOGGER: Logger = Logger;
++
++/// The log file: `LIGHTCRAFT_LOG` if set, else `LightCraft.log` in the settings folder. A program
++/// started from Workbench has no console, and the AROS Shell cannot redirect a command's error
++/// output, so a failure would otherwise leave nothing to read. Shell starts also print it.
++static LOG_FILE: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
++static SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++/// `--memory` writes nothing, a log file included (as on the desktop).
++static NO_LOG_FILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++fn log_line(line: &str) {
++    use std::io::Write;
++    let file = LOG_FILE.get_or_init(|| {
++        if NO_LOG_FILE.load(std::sync::atomic::Ordering::Relaxed) {
++            return None;
++        }
++        let path = std::env::var_os("LIGHTCRAFT_LOG")
++            .filter(|p| !p.is_empty())
++            .map(PathBuf::from)
++            .or_else(|| lightcraft_engine::config::config_dir().map(|d| d.join("LightCraft.log")))?;
++        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
++    });
++    if let Some(file) = file {
++        let mut file = file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++        let _ = writeln!(file, "lightcraft: {line}");
++        let _ = file.flush();
++    }
++    if SHELL.load(std::sync::atomic::Ordering::Relaxed) || file.is_none() {
++        let _ = writeln!(std::io::stderr(), "lightcraft: {line}");
++    }
++}
++
++fn install_logger() {
++    let level = match std::env::var("RUST_LOG").ok().as_deref().map(str::trim) {
++        Some("trace") => log::LevelFilter::Trace,
++        Some("debug") => log::LevelFilter::Debug,
++        Some("warn") => log::LevelFilter::Warn,
++        Some("error") => log::LevelFilter::Error,
++        Some("off") => log::LevelFilter::Off,
++        _ => log::LevelFilter::Info,
++    };
++    let default_hook = std::panic::take_hook();
++    std::panic::set_hook(Box::new(move |info| {
++        log::error!("LightCraft internal error: {info}");
++        default_hook(info);
++    }));
++    if log::set_logger(&LOGGER).is_ok() {
++        log::set_max_level(level);
++    }
++}
++
++struct Options {
++    files: Vec<String>,
++    library: Option<PathBuf>,
++    memory: bool,
++    seed_demo: bool,
++    window: Option<(u32, u32)>,
++    screenshot: Option<String>,
++    screenshot_frames: u64,
++    test_steps: Vec<Step>,
++}
++
++/// One step of `--test-steps`: at frame `frame`, send a control request (`method`, `params`: the
++/// requests of the desktop app's `--control` server, see lightcraft_ui_egui::control), take a
++/// screenshot or quit. Each request's answer is logged.
++#[derive(Debug)]
++struct Step {
++    frame: u64,
++    request: Option<(String, serde_json::Value)>,
++    screenshot: Option<String>,
++    quit: bool,
++}
++
++fn read_steps(path: &str) -> Result<Vec<Step>, String> {
++    let text = std::fs::read_to_string(path).map_err(|e| format!("--test-steps {path}: {e}"))?;
++    let list: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| format!("--test-steps {path}: {e}"))?;
++    let mut steps = Vec::new();
++    for v in list {
++        let frame = v.get("frame").and_then(serde_json::Value::as_u64).ok_or_else(|| format!("--test-steps: a step without a frame: {v}"))?;
++        steps.push(Step {
++            frame,
++            request: v
++                .get("method")
++                .and_then(serde_json::Value::as_str)
++                .map(|m| (m.to_owned(), v.get("params").cloned().unwrap_or(serde_json::json!({})))),
++            screenshot: v.get("screenshot").and_then(serde_json::Value::as_str).map(str::to_owned),
++            quit: v.get("quit").and_then(serde_json::Value::as_bool).unwrap_or(false),
++        });
++    }
++    steps.sort_by_key(|s| s.frame);
++    Ok(steps)
++}
++
++/// The Shell arguments after the renderer choice was taken out. File and drawer names are resolved
++/// by DOS now, in the directory they were typed in (volumes, assigns, relative names, `/` parents).
++fn parse_args(args: Vec<String>) -> Result<Option<Options>, String> {
++    let mut o = Options {
++        files: Vec::new(),
++        library: None,
++        memory: false,
++        seed_demo: true,
++        window: None,
++        screenshot: None,
++        screenshot_frames: 20,
++        test_steps: Vec::new(),
++    };
++    let mut args = args.into_iter();
++    while let Some(a) = args.next() {
++        match a.as_str() {
++            "--help" | "-h" => {
++                println!("{USAGE}\n{}", launch::HELP);
++                return Ok(None);
++            }
++            "--version" | "-V" => {
++                println!("LightCraft {RELEASE} for AROS ({TARGET})");
++                return Ok(None);
++            }
++            "--library" => o.library = Some(PathBuf::from(resolve(&args.next().unwrap_or_default())?)),
++            "--memory" | "--demo" => o.memory = true,
++            "--no-demo" => o.seed_demo = false,
++            "--control" => return Err("--control: the control server is not available on AROS".to_owned()),
++            "--window" => {
++                let v = args.next().unwrap_or_default();
++                let size = v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
++                o.window = Some(size.ok_or_else(|| format!("--window: \"{v}\" is not <width>x<height>"))?);
++            }
++            "--screenshot" => o.screenshot = args.next(),
++            "--test-steps" => o.test_steps = read_steps(&args.next().unwrap_or_default())?,
++            "--screenshot-frames" => {
++                let v = args.next().unwrap_or_default();
++                o.screenshot_frames = v.parse().map_err(|_| format!("--screenshot-frames: \"{v}\" is not a number"))?;
++            }
++            "--" => {
++                for name in args.by_ref() {
++                    o.files.push(resolve(&name)?);
++                }
++            }
++            s if s.starts_with("--") => return Err(format!("unknown option \"{s}\"; see --help")),
++            name => o.files.push(resolve(name)?),
++        }
++    }
++    Ok(Some(o))
++}
++
++fn resolve(name: &str) -> Result<String, String> {
++    startup::absolute(name).map(|p| p.to_string_lossy().into_owned()).map_err(|e| format!("{name}: {e}"))
++}
++
++/// Stops with `message`: on the console and, for a Workbench start, in a requester.
++fn fail(message: &str) -> std::process::ExitCode {
++    startup::show_error("LightCraft", message);
++    std::process::ExitCode::from(20)
++}
++
++// The main task's stack: a Shell start gives the program the Shell's (40,960 bytes on AROS One),
++// which the window loop overruns; the start-up code runs the program on 16 MiB instead.
++aros_startup::minimum_stack!(16 << 20);
++
++fn main() -> std::process::ExitCode {
++    // Unix-style probes (settings, fonts, the local time zone) must not open "insert volume"
++    // requesters.
++    startup::quiet_dos();
++    // ABIv11's C library keeps one saved directory for the whole process and restores it on the
++    // main task at exit; whichever task changes directory first decides what is saved. This
++    // chdir, before any worker can make one, keeps the main task's own (Workbench start) lock.
++    if let Err(e) = std::env::set_current_dir(".") {
++        return fail(&format!("cannot keep the start directory: {e}"));
++    }
++    let start = match startup::startup(&[launch::KEY]) {
++        Ok(s) => s,
++        Err(e) => return fail(&e),
++    };
++    SHELL.store(!start.workbench, std::sync::atomic::Ordering::Relaxed);
++    // Settings and the library beside the program unless the user chose a folder: a portable
++    // drawer, as upstream's portable mode and 0.13.0 for AROS keep it.
++    let data = match startup::program_dir() {
++        Ok(dir) => dir.join("LightCraftData"),
++        Err(e) => return fail(&format!("cannot find the program's drawer: {e}")),
++    };
++    startup::set_default_env("LIGHTCRAFT_CONFIG_DIR", &data);
++    let mut args: Vec<String> = if start.workbench { Vec::new() } else { std::env::args().skip(1).collect() };
++    let env = std::env::var("GUI_RENDERER").ok();
++    let choice = match launch::choose(&mut args, &start.tooltypes, env.as_deref(), egui_aros::RendererRequest::Auto) {
++        Ok(c) => c,
++        Err(e) => return fail(&e),
++    };
++    let mut options = match parse_args(args) {
++        Ok(Some(o)) => o,
++        Ok(None) => return std::process::ExitCode::SUCCESS,
++        Err(e) => return fail(&e),
++    };
++    options.files.extend(start.files);
++    if options.memory {
++        NO_LOG_FILE.store(true, std::sync::atomic::Ordering::Relaxed);
++    } else if let Some(dir) = lightcraft_engine::config::config_dir()
++        && let Err(e) = std::fs::create_dir_all(&dir)
++    {
++        eprintln!("lightcraft: cannot create the settings folder {}: {e}", dir.display());
++    }
++    install_logger();
++    log::info!("LightCraft {RELEASE} for AROS ({TARGET}); start from {}", if start.workbench { "Workbench" } else { "Shell" });
++    log::info!("GUI_RENDERER requested {} (from {})", launch::request_name(choice.request), choice.source.name());
++    // The develop pipeline has no GPU on AROS (no wgpu backend): the setting stays off.
++    lightcraft_engine::gpu::set_enabled(false);
++    let code = run(options, choice, data);
++    // AROS's pthread library joins every thread, detached ones included, in its exit handler; the
++    // idle workers of rayon's global pool (decoding, rendering) never end by themselves. Nothing
++    // uses the pool after this point.
++    #[cfg(target_os = "aros")]
++    rayon_core::terminate_global_thread_pool();
++    log::info!("shutdown: exit({code})");
++    std::process::ExitCode::from(code)
++}
++
++/// The library session, as the desktop app's `session::open_session` opens it, without the lens
++/// database download (no network use on AROS that the user did not ask for).
++fn open_session(in_memory: bool, launch: &Launch, seed_demo: bool) -> (Session, Option<LibraryProblem>) {
++    let fresh = || Session::new().with_fs().with_default_denoise_models().with_system_clock();
++    let (mut s, problem) = match launch {
++        Launch::Ask => (fresh(), None),
++        Launch::Open { dir, remembered, .. } => {
++            if in_memory {
++                (if seed_demo { Session::with_demo() } else { Session::new() }.with_fs().with_default_denoise_models().with_system_clock(), None)
++            } else if let Some(dir) = dir {
++                if *remembered && let Some(why) = lightcraft_ui_egui::panels::library_problem::missing_library_reason(dir) {
++                    log::error!("library {} can't be opened: {why}", dir.display());
++                    (fresh(), Some(LibraryProblem { existing_only: true, ..LibraryProblem::new(dir.to_string_lossy(), why) }))
++                } else {
++                    let t0 = std::time::Instant::now();
++                    let mut s = fresh();
++                    match s.open_library(dir, seed_demo && !remembered) {
++                        Ok(r) => {
++                            let replayed = r.replayed;
++                            log::info!(
++                                "library {}: {} photos, {replayed} log records replayed ({:.1} ms)",
++                                dir.display(),
++                                s.catalog.len(),
++                                t0.elapsed().as_secs_f64() * 1000.0
++                            );
++                            (s, None)
++                        }
++                        Err(e) => {
++                            log::error!("can't open library {}: {e}", dir.display());
++                            (fresh(), Some(LibraryProblem::new(dir.to_string_lossy(), e.to_string())))
++                        }
++                    }
++                }
++            } else {
++                (fresh(), Some(LibraryProblem::new("", "There is no folder to keep the library in. Choose a folder for it.")))
++            }
++        }
++    };
++    if !in_memory {
++        s = s.with_default_lens_database();
++    }
++    s.face_models_dir = lightcraft_engine::config::default_face_models_dir();
++    s.slide_templates_dir = lightcraft_engine::config::config_dir().map(|d| d.join(lightcraft_engine::slide_template::DIR_NAME));
++    (s, problem)
++}
++
++/// The app as egui-aros runs it: the desktop app's `logic` and `ui` (its unsaved-changes and
++/// running-tasks prompts cancel the close themselves and close the window once answered), the
++/// settings writer, and the screenshot and test-step hooks.
++struct Host {
++    app: LightcraftApp,
++    writer: PrefsWriter,
++    shared_window: services::SharedWindow,
++    ctx: egui::Context,
++    screenshot: Option<(String, u64)>,
++    done: bool,
++    renderer_logged: bool,
++    steps: std::collections::VecDeque<Step>,
++    control: Sender<ControlRequest>,
++    answers: Vec<(u64, String, Receiver<ControlResponse>)>,
++    frame: u64,
++    step_shot: Option<String>,
++    /// Per frame: (whole frame, raster + present), for the summary in the log at shutdown.
++    frame_costs: Vec<(Duration, Duration)>,
++}
++
++/// One log line: frames, and the median, mean and longest frame and raster+present times.
++fn frame_summary(costs: &[(Duration, Duration)]) -> String {
++    if costs.is_empty() {
++        return "no frames".to_owned();
++    }
++    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
++    let stats = |mut v: Vec<f64>| {
++        v.sort_by(f64::total_cmp);
++        let mean = v.iter().sum::<f64>() / v.len() as f64;
++        format!("median {:.0} ms, mean {:.0} ms, max {:.0} ms", v[v.len() / 2], mean, v[v.len() - 1])
++    };
++    format!(
++        "{} frames; frame {}; raster+present {}",
++        costs.len(),
++        stats(costs.iter().map(|c| ms(c.0)).collect()),
++        stats(costs.iter().map(|c| ms(c.1)).collect())
++    )
++}
++
++impl egui_aros::App for Host {
++    fn started(&mut self, window: egui_aros::WindowHandle) {
++        *self.shared_window.borrow_mut() = Some(window);
++    }
++
++    // --screenshot needs the frame's pixels; with OpenGL they are read back only then.
++    fn wants_pixels(&self) -> bool {
++        self.screenshot.is_some() || self.step_shot.is_some()
++    }
++
++    fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
++        self.app.raw_input_hook(&self.ctx, raw);
++    }
++
++    fn logic(&mut self, ctx: &egui::Context) {
++        // --screenshot counts frames, and with no idle poll an untouched window draws none after
++        // it settles: keep drawing until the picture is taken.
++        if self.screenshot.is_some() && !self.done {
++            ctx.request_repaint();
++        }
++        while self.steps.front().is_some_and(|s| s.frame <= self.frame) {
++            let Some(step) = self.steps.pop_front() else { break };
++            if let Some((method, params)) = step.request {
++                let (req, answer) = ControlRequest::new(method.clone(), params);
++                if self.control.send(req).is_ok() {
++                    self.answers.push((step.frame, method, answer));
++                }
++            }
++            if step.screenshot.is_some() {
++                self.step_shot = step.screenshot;
++            }
++            if step.quit {
++                log::info!("test step {}: quit", step.frame);
++                self.done = true;
++            }
++            ctx.request_repaint();
++        }
++        self.app.logic(ctx);
++        self.writer.tick(&mut self.app, ctx);
++        self.answers.retain(|(frame, method, answer)| match answer.try_recv() {
++            Ok(v) => {
++                log::info!("test step {frame}: {method}: {v}");
++                false
++            }
++            Err(std::sync::mpsc::TryRecvError::Empty) => true,
++            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
++                log::info!("test step {frame}: {method}: no answer");
++                false
++            }
++        });
++        if !self.steps.is_empty() || !self.answers.is_empty() {
++            ctx.request_repaint();
++        }
++    }
++
++    fn ui(&mut self, ui: &mut egui::Ui) {
++        self.app.ui(ui);
++    }
++
++    fn quit_requested(&self) -> bool {
++        self.done
++    }
++
++    fn frame_done(&mut self, report: &egui_aros::FrameReport, renderer: &egui_aros::raster::Renderer) {
++        self.frame = report.frame;
++        let drawn = report.raster + report.present;
++        self.frame_costs.push((report.logic + report.ui + report.tessellate + report.textures + drawn, drawn));
++        // RUST_LOG=debug: one line per frame, to see what woke the loop and what the frame cost.
++        log::debug!(
++            "frame {} {}x{}: slept {:?} (timeout {:?}, by timeout {}), late {:?}, events {}, logic {:?} ui {:?} tessellate {:?} raster {:?} present {:?}, next repaint {:?}",
++            report.frame,
++            report.width,
++            report.height,
++            report.waited,
++            report.wait_timeout,
++            report.woke_by_timeout,
++            report.repaint_late,
++            report.events,
++            report.logic,
++            report.ui,
++            report.tessellate,
++            report.raster,
++            report.present,
++            report.next_repaint
++        );
++        if let Some(path) = self.step_shot.take() {
++            match write_png(&path, renderer) {
++                Ok(()) => log::info!("test step: wrote {path}"),
++                Err(e) => log::error!("test step: screenshot {path}: {e}"),
++            }
++        }
++        if !self.renderer_logged {
++            self.renderer_logged = true;
++            log::info!("GUI_RENDERER using {}", egui_aros::renderer_name());
++            log_tasks("first frame");
++        }
++        if let Some((path, frames)) = &self.screenshot
++            && report.frame >= *frames
++        {
++            match write_png(path, renderer) {
++                Ok(()) => log::info!("wrote {path}"),
++                Err(e) => log::error!("screenshot {path}: {e}"),
++            }
++            self.done = true;
++        }
++    }
++}
++
++fn new_app(shared_window: services::SharedWindow, options: &mut Options, data: &std::path::Path, control: Receiver<ControlRequest>) -> (LightcraftApp, PrefsWriter) {
++    let (prefs, prefs_warning, keep_prefs_file) = load_prefs(options.memory);
++    if let Some(ui) = &prefs {
++        lightcraft_ui_egui::i18n::set_language(ui.language);
++    }
++    // --library, else LIGHTCRAFT_LIBRARY, else the list of recent libraries if Settings say Ask
++    // me, else the library last opened, else LightCraftData/Library
++    let env_library: Option<PathBuf> = std::env::var_os("LIGHTCRAFT_LIBRARY").filter(|p| !p.is_empty()).map(Into::into);
++    let launch = lightcraft_ui_egui::panels::library_problem::launch_plan(
++        options.memory,
++        options.library.take(),
++        env_library,
++        prefs.as_ref().map(|u| &u.settings),
++        Some(data.join("Library")),
++    );
++    let files = std::mem::take(&mut options.files);
++    let (session, mut problem) = open_session(options.memory, &launch, options.seed_demo && files.is_empty());
++    let mut app = LightcraftApp::new(session, services::aros(shared_window)).with_control(control);
++    if let Some(ui) = prefs {
++        app.ui = ui;
++    }
++    if launch == Launch::Ask {
++        problem = Some(LibraryProblem::choose_later(&app.ui.settings));
++    }
++    lightcraft_ui_egui::i18n::set_language(app.ui.language);
++    app.integrated_titlebar = false;
++    app.notices.extend(prefs_warning);
++    app.disk_space_notice = true;
++    if problem.is_none() && files.is_empty() {
++        lightcraft_ui_egui::panels::empty_library::open_on_empty_library(&mut app);
++    }
++    let writer = PrefsWriter {
++        path: if options.memory { None } else { prefs_path() },
++        written: serde_json::to_vec_pretty(&app.ui).unwrap_or_default(),
++        library: app.ui.settings.library_path.clone(),
++        keep_file: keep_prefs_file,
++        ..Default::default()
++    };
++    // The library in use is the one to open next time, as Open Library makes it (after the
++    // snapshot above, so the writer saves it).
++    if problem.is_none()
++        && let Some(dir) = app.session.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.to_string_lossy().into_owned())
++        && app.ui.settings.library_path != dir
++    {
++        lightcraft_ui_egui::panels::settings::remember_library(&mut app.ui.settings.recent_libraries, &dir);
++        app.ui.settings.library_path = dir;
++    }
++    // No GPU for the develop pipeline on AROS: the setting stays off.
++    app.ui.settings.gpu = false;
++    if let Some(mut p) = problem {
++        p.pending_import = files;
++        app.library_problem = Some(p);
++    } else if !files.is_empty() {
++        if let Err(e) = lightcraft_ui_egui::import::start_paths(&mut app, files) {
++            log::warn!("import at launch: {e}");
++        }
++        app.ui.view = lightcraft_ui_egui::state::ViewMode::PhotoGrid;
++    }
++    (app, writer)
++}
++
++fn run(mut options: Options, choice: launch::RendererChoice, data: PathBuf) -> u8 {
++    let (request, narrowed) = launch::effective(choice);
++    if let Some(why) = narrowed {
++        log::info!("GUI_RENDERER AUTO uses the CPU: {why}");
++    }
++    let ctx = egui::Context::default();
++    let shared_window: services::SharedWindow = std::rc::Rc::new(std::cell::RefCell::new(None));
++    let (tx, rx) = std::sync::mpsc::channel();
++    let (app, writer) = new_app(shared_window.clone(), &mut options, &data, rx);
++    // The size the window was last used at, else the desktop app's, within the screen; --window
++    // sets it exactly.
++    let remembered = app.ui.window.and_then(lightcraft_ui_egui::window_place::WindowPlace::checked).map(|w| w.size);
++    let [dw, dh] = remembered.unwrap_or(lightcraft_ui_egui::window_place::DEFAULT_SIZE);
++    let (sw, sh) = egui_aros::screen_size().map_or((1456, 948), |(w, h)| (w, h));
++    let (w, h) = options.window.unwrap_or(((dw as u32).min(sw.saturating_sub(16)).max(640), (dh as u32).min(sh.saturating_sub(48)).max(400)));
++    log_tasks("app created");
++    let mut host = Host {
++        app,
++        writer,
++        shared_window,
++        ctx: ctx.clone(),
++        screenshot: options.screenshot.clone().map(|p| (p, options.screenshot_frames)),
++        done: false,
++        renderer_logged: false,
++        steps: options.test_steps.drain(..).collect(),
++        control: tx,
++        answers: Vec::new(),
++        frame: 0,
++        step_shot: None,
++        frame_costs: Vec::new(),
++    };
++    let run_options = egui_aros::Options {
++        title: "LightCraft".to_owned(),
++        inner_size: (w.max(1), h.max(1)),
++        min_inner_size: Some((640, 400)),
++        clear_color: [12, 12, 12],
++        // No idle poll: as eframe on the desktop, the loop sleeps until input, a repaint the app
++        // asks for (it does while background work runs), or a wake-up from another thread.
++        idle_poll: None,
++        renderer: request,
++        ..Default::default()
++    };
++    // A panic below the app (renderer, window) unwinds to here on ABIv11, so the shutdown below
++    // still runs.
++    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| egui_aros::run(run_options, ctx, &mut host)))
++        .unwrap_or_else(|_| Err(egui_aros::Error::Window("the window loop stopped after a panic".into())));
++    if let Some(info) = egui_aros::renderer_info() {
++        log::info!("GUI_RENDERER {}", info.summary());
++    }
++    log::info!("frames: {}", frame_summary(&host.frame_costs));
++    // The services hold the window handle; let go of it with the window.
++    *host.shared_window.borrow_mut() = None;
++    let code = match result {
++        Ok(()) => 0,
++        Err(e) => {
++            log::error!("{e}");
++            if !SHELL.load(std::sync::atomic::Ordering::Relaxed) {
++                startup::show_error("LightCraft", &e.to_string());
++            }
++            20
++        }
++    };
++    // As the desktop app's on_exit: settings, then the library, then the background work.
++    host.app.ui.window = host.writer.window_at_exit(host.app.ui.window);
++    if host.screenshot.is_none()
++        && let Err(e) = host.writer.save(&host.app)
++    {
++        log::error!("{e}");
++    }
++    if let Err(e) = host.app.session.close_library() {
++        log::error!("saving the library failed: {e}");
++    }
++    // Demo photos still being generated stop between rows (their pixels are dropped): a
++    // full-size one takes minutes in an emulator, and the process cannot end while its threads
++    // run (AROS's pthread library waits for every thread).
++    lightcraft_scenes::stop_renders();
++    if !host.app.shutdown(EXIT_WAIT) {
++        log::warn!("quit: background work was still running after {EXIT_WAIT:?}");
++    }
++    drop(host);
++    log::info!("shutdown: application state dropped");
++    // AROS's pthread library waits for every thread when the program exits: name the tasks still
++    // there, so a worker that does not end can be found in the log.
++    log_tasks("shutdown");
++    code
++}
++
++/// Logs the program's threads still present (`pthread thread #N` on AROS), at shutdown and, with
++/// LIGHTCRAFT_LOG_TASKS set, at start-up points too.
++fn log_tasks(when: &str) {
++    if when != "shutdown" && std::env::var_os("LIGHTCRAFT_LOG_TASKS").is_none() {
++        return;
++    }
++    let threads: Vec<String> = startup::task_names().into_iter().filter(|t| t.starts_with("pthread")).collect();
++    log::info!("{when}: threads: {}", if threads.is_empty() { "none".to_owned() } else { threads.join(", ").replace('\t', ":") });
++}
++
++fn write_png(path: &str, r: &egui_aros::raster::Renderer) -> Result<(), String> {
++    let img = lightcraft_codecs::EncodeImage::new(r.width as u32, r.height as u32, 4, lightcraft_codecs::Samples::U8(&r.frame));
++    let png = lightcraft_codecs::encode_png(&img, &lightcraft_codecs::EncodeMeta::default()).map_err(|e| e.to_string())?;
++    std::fs::write(path, png).map_err(|e| e.to_string())
++}
+diff --git a/apps/lightcraft-aros/src/services.rs b/apps/lightcraft-aros/src/services.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..26cce3c72875cd43a6a981eb62fc9565b2fec36f
+--- /dev/null
++++ b/apps/lightcraft-aros/src/services.rs
+@@ -0,0 +1,182 @@
++//! The platform services LightCraft uses on AROS: ASL requesters for files and folders, file
++//! writing and PNG encoding. The same contract as the desktop app's `session::services`, without
++//! rfd and the openers of other programs, links and folders, which have no AROS backend here
++//! (`None`: the app treats them as not available). Text goes through the system clipboard by
++//! egui-aros.
++//!
++//! Paths: the program runs in the -nix path mode; requesters speak DOS names, converted at this
++//! edge (egui_aros::startup).
++
++use std::cell::RefCell;
++use std::rc::Rc;
++
++use egui_aros::WindowHandle;
++use egui_aros::asl::{Select, request};
++use egui_aros::startup::{dos_to_nix, nix_to_dos};
++use lightcraft_ui_egui::Services;
++use lightcraft_ui_egui::i18n::tr;
++use lightcraft_ui_egui::pick::{PickKind, PickRequest};
++
++/// The window the requesters are parented to, set once the window is open (the requester runs on
++/// the main thread, modally, while the loop is inside the service call). The handle holds the
++/// window weakly: after it closes, a requester opens without a parent.
++pub type SharedWindow = Rc<RefCell<Option<WindowHandle>>>;
++
++/// The drawer the last requester ended in, where the next one starts.
++type LastDir = Rc<RefCell<String>>;
++
++/// An AmigaDOS pattern (matched without regard to case) for a list of extensions. asl.library
++/// copies the pattern into a 257-byte gadget without a length check (VectorCraft port): a list too
++/// long for that shows every file instead.
++fn pattern(extensions: &[&str]) -> String {
++    if extensions.is_empty() {
++        return String::new();
++    }
++    let p = format!("#?.({})", extensions.join("|"));
++    if p.len() < 200 { p } else { "#?".to_owned() }
++}
++
++/// The drawer part of a -nix path (`/Work/Photos` for `/Work/Photos/a.jpg`).
++fn dir_part(path: &str) -> &str {
++    match path.rfind('/') {
++        Some(0) | None => "",
++        Some(i) => &path[..i],
++    }
++}
++
++/// Shows a requester and returns the chosen -nix paths (empty: cancelled).
++fn pick(window: &SharedWindow, last: &LastDir, select: Select, title: &str, file: &str, pat: &str) -> Vec<String> {
++    let Some(win) = window.borrow().clone() else { return Vec::new() };
++    let dir = last.borrow().clone();
++    let start = if dir.is_empty() { String::new() } else { nix_to_dos(&dir).unwrap_or_default() };
++    let chosen: Vec<String> = request(&win, select, title, &start, file, pat)
++        .into_iter()
++        .filter_map(|dos| match dos_to_nix(&dos) {
++            Ok(p) => Some(p),
++            Err(e) => {
++                log::warn!("requester: {dos}: {e}");
++                None
++            }
++        })
++        .collect();
++    if let Some(first) = chosen.first() {
++        let drawer = if matches!(select, Select::Drawer) { first.as_str() } else { dir_part(first) };
++        *last.borrow_mut() = drawer.to_owned();
++    }
++    chosen
++}
++
++fn open_files(window: &SharedWindow, last: &LastDir, title: &str, extensions: &[&str]) -> Vec<String> {
++    pick(window, last, Select::OpenMany, title, "", &pattern(extensions))
++}
++
++fn open_file(window: &SharedWindow, last: &LastDir, title: &str, extensions: &[&str]) -> Vec<String> {
++    pick(window, last, Select::Open, title, "", &pattern(extensions))
++}
++
++fn save_file(window: &SharedWindow, last: &LastDir, title: &str, extensions: &[&str], name: &str) -> Option<String> {
++    pick(window, last, Select::Save, title, name, &pattern(extensions)).into_iter().next()
++}
++
++fn folder(window: &SharedWindow, last: &LastDir, title: &str) -> Option<String> {
++    pick(window, last, Select::Drawer, title, "", "").into_iter().next()
++}
++
++/// The services for this host.
++pub fn aros(window: SharedWindow) -> Services {
++    let last: LastDir = Rc::new(RefCell::new(String::new()));
++    let (w, l) = (window.clone(), last.clone());
++    // Commands' dialogs: the desktop app shows them on a thread of their own and answers later;
++    // an ASL requester runs here on the main task, and the answer is ready when it closes.
++    let picker = Box::new(move |req: PickRequest| {
++        let exts: &[&str] = req.filter.as_ref().map_or(&[], |(_, e)| e);
++        let title = req.title.clone().unwrap_or_default();
++        let paths = match req.kind {
++            PickKind::Files => open_files(&w, &l, &title, exts),
++            PickKind::File => open_file(&w, &l, &title, exts),
++            PickKind::Folder => folder(&w, &l, &title).into_iter().collect(),
++            PickKind::Save => save_file(&w, &l, &title, exts, req.file_name.as_deref().unwrap_or("")).into_iter().collect(),
++        };
++        let (tx, rx) = std::sync::mpsc::channel();
++        let _ = tx.send(paths);
++        Ok(rx)
++    });
++    macro_rules! files {
++        ($title:expr, $exts:expr) => {{
++            let (w, l) = (window.clone(), last.clone());
++            Some(Box::new(move || open_files(&w, &l, tr($title), $exts)) as lightcraft_ui_egui::PickFiles)
++        }};
++    }
++    macro_rules! file {
++        ($title:expr, $exts:expr) => {{
++            let (w, l) = (window.clone(), last.clone());
++            Some(Box::new(move || open_file(&w, &l, tr($title), $exts)) as lightcraft_ui_egui::PickFiles)
++        }};
++    }
++    macro_rules! save {
++        ($title:expr, $exts:expr) => {{
++            let (w, l) = (window.clone(), last.clone());
++            Some(Box::new(move |name: &str| save_file(&w, &l, tr($title), $exts, name)) as lightcraft_ui_egui::SaveFile)
++        }};
++    }
++    let (wf, lf) = (window.clone(), last.clone());
++    let (wl, ll) = (window.clone(), last.clone());
++    Services {
++        // the places of the Local browser: AROS has no home folder
++        local_places: Some(vec![("RAM Disk".to_owned(), "/RAM".to_owned()), ("System".to_owned(), "/SYS".to_owned())]),
++        picker: Some(picker),
++        pick_files: files!("Import Photos", lightcraft_engine::import::EXTENSIONS),
++        pick_denoise_model: file!("Choose a Denoise Model", &["onnx"]),
++        pick_model_file: file!("Add a Face Recognition Model", &["onnx"]),
++        pick_preset_files: files!("Import Presets", &["lcpreset", "xmp", "lrtemplate", "zip", "dng", "lmp", "mplumpack", "cube"]),
++        pick_tracklog: file!("Auto-Tag from Tracklog", &["gpx"]),
++        pick_display_profile: file!("Choose Monitor Profile", &["icc", "icm"]),
++        screen_profile: None,
++        save_preset_file: save!("Export Presets", &["lcpreset"]),
++        pick_keyword_list: file!("Import Keywords", &["txt", "utf8"]),
++        save_keyword_list: save!("Export Keywords", &["txt"]),
++        pick_curve_preset_files: files!("Import Point Curve Presets", &["lccurve", "json"]),
++        save_curve_preset_file: save!("Export Point Curve Presets", &["lccurve"]),
++        pick_slideshow_templates: files!("Import Slideshow Templates", &["json"]),
++        save_slideshow_template: save!("Export Slideshow Template", &["json"]),
++        pick_print_templates: files!("Import Print Templates", &[lightcraft_engine::print::template::FILE_EXT]),
++        save_print_template: save!("Export Print Template", &[lightcraft_engine::print::template::FILE_EXT]),
++        // atomic (temp file + sync + rename): a failed write never leaves a truncated file
++        write_shared: Some(std::sync::Arc::new(lightcraft_engine::export::write_file)),
++        write: Some(Box::new(lightcraft_engine::export::write_file)),
++        write_new: Some(Box::new(lightcraft_engine::export::write_file_new)),
++        png: Some(Box::new(|img: &lightcraft_raster::Rgba8| {
++            lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &lightcraft_codecs::EncodeMeta::default()).unwrap_or_default()
++        })),
++        reveal: None,
++        log_file: lightcraft_engine::config::config_dir().map(|d| d.join("LightCraft.log").display().to_string()),
++        pick_folder: Some(Box::new(move || folder(&wf, &lf, tr("Open Library")))),
++        pick_lightroom_catalog: Some(Box::new(move || open_file(&wl, &ll, tr("Import Lightroom Catalog"), &["lrcat", "zip"]).into_iter().next())),
++        open_url: None,
++        open_with: None,
++        open_all_with: None,
++        check_editor: None,
++        backup_library: None,
++        restore_library: None,
++        system_theme: None,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn path_parts() {
++        assert_eq!(dir_part("/Work/Photos/a.jpg"), "/Work/Photos");
++        assert_eq!(dir_part("/RAM"), "");
++        assert_eq!(dir_part("a.jpg"), "");
++    }
++
++    #[test]
++    fn patterns_fit_the_requester() {
++        assert_eq!(pattern(&["gpx"]), "#?.(gpx)");
++        assert_eq!(pattern(&[]), "");
++        assert!(pattern(lightcraft_engine::import::EXTENSIONS).len() < 200);
++    }
++}

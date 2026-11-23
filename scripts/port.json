@@ -1,0 +1,24 @@
+{
+  "comment": "The app this Craft port builds. scripts/craft.py runs the shared Craft tools pinned in scripts/tooling.json; they read only this file for app-specific names.",
+  "id": "lightcraft",
+  "name": "LightCraft",
+  "env_prefix": "LIGHTCRAFT",
+  "packages": {
+    "lightcraft-aros": "LightCraft",
+    "lightcraft-cli": "lightcraft-cli"
+  },
+  "tools": {},
+  "craft_fonts": {
+    "comment": "LightCraft's engine embeds every face of fonts/manifest.txt. The Chinese, Japanese and Korean faces (about 43 MB) are left out: AROS loads a program into memory whole. The Arabic, Hebrew, Thai, Georgian, Devanagari and symbol faces (about 3 MB) stay.",
+    "manifests": [
+      "fonts/manifest.txt"
+    ],
+    "exclude_families": [
+      "Shippori Mincho",
+      "BIZ UDPGothic",
+      "BIZ UDMincho",
+      "Noto Sans CJK SC",
+      "NanumGothic"
+    ]
+  }
+}

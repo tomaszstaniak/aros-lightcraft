@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:33:28 +0100
+Subject: [PATCH] AROS: the CLI runs its command on its own stack, ends rayon's
+ pool and turns volume requesters off
+
+An AROS program runs on the stack of whatever starts it (40,960 bytes in an AROS One Shell); decoding and rendering overrun that. The command runs on a thread with an 8 MiB stack and its exit code returns to the main task. AROS's pthread library joins every thread at exit, and rayon's idle global workers never end by themselves: the patched rayon-core ends them first. chrono reads /etc/localtime, which names a volume that does not exist on AROS; aros-startup's quiet_dos makes DOS return an error instead of a "Please insert volume" requester. The same as the DeckCraft port's CLI patches.
+---
+ apps/lightcraft-cli/Cargo.toml  |  8 ++++++++
+ apps/lightcraft-cli/src/main.rs | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/apps/lightcraft-cli/Cargo.toml b/apps/lightcraft-cli/Cargo.toml
+index e55d458b324577048cdbd3f5b09f24d27d670690..621668d09489defa9fe41a43a2ff1aa0b9bab705 100644
+--- a/apps/lightcraft-cli/Cargo.toml
++++ b/apps/lightcraft-cli/Cargo.toml
+@@ -25,6 +25,14 @@ lightcraft-merge = { workspace = true }
+ serde_json = { workspace = true }
+ dhat = { workspace = true, optional = true }
+ 
++# The patched rayon-core (see the AROS port's crate patches) can end the global pool's threads,
++# which AROS's pthread library otherwise waits for forever when the program exits. Program start
++# on AROS (aros-startup, from the egui-aros repository, without egui) is supplied by the port's
++# build.
++[target.'cfg(target_os = "aros")'.dependencies]
++rayon-core = "1.13"
++aros-startup = "0.1"
++
+ [dev-dependencies]
+ lightcraft-testkit = { workspace = true }
+ 
+diff --git a/apps/lightcraft-cli/src/main.rs b/apps/lightcraft-cli/src/main.rs
+index d3842295585236afe9e5a094875338b2ca67ebc2..9121e5b26a5bac9b56f18007595faf5d1a89e66d 100644
+--- a/apps/lightcraft-cli/src/main.rs
++++ b/apps/lightcraft-cli/src/main.rs
+@@ -147,7 +147,40 @@ fn library_error(dir: &str, e: lightcraft_engine::EngineError) -> String {
+     }
+ }
+ 
++/// The command thread's stack on AROS (see `main`).
++#[cfg(target_os = "aros")]
++const AROS_STACK: usize = 8 << 20;
++
+ fn main() -> ExitCode {
++    // AROS: Unix-style probes (chrono's /etc/localtime for the local time, /usr and /etc folders)
++    // name volumes that do not exist; DOS answers them with an error instead of an "insert
++    // volume" requester that stops the command until someone answers it.
++    #[cfg(target_os = "aros")]
++    aros_startup::quiet_dos();
++    #[cfg(not(target_os = "aros"))]
++    let code = cli_main();
++    // An AROS program runs on the stack of whatever starts it: 40,960 bytes in an AROS One Shell,
++    // and whatever an MCP client's process creation gives. Decoding and rendering overrun that,
++    // and the overrun takes the system down with it. The command runs on a thread with its own
++    // stack; the exit code comes back to the main task, because ending the process from another
++    // thread crashes on AROS.
++    #[cfg(target_os = "aros")]
++    let code = std::thread::Builder::new()
++        .name("lightcraft-cli".into())
++        .stack_size(AROS_STACK)
++        .spawn(cli_main)
++        .map_err(|e| eprintln!("lightcraft-cli: {e}"))
++        .and_then(|worker| worker.join().map_err(|_| eprintln!("lightcraft-cli: the command panicked")))
++        .unwrap_or(ExitCode::FAILURE);
++    // AROS's pthread library joins every thread in its exit handler; rayon's idle global workers
++    // (rendering and decoding run on them) never end by themselves, so a command that used them
++    // could not exit.
++    #[cfg(target_os = "aros")]
++    rayon_core::terminate_global_thread_pool();
++    code
++}
++
++fn cli_main() -> ExitCode {
+     // `--features dhat-heap`: count allocations; the profile is written when `_heap` drops
+     // (LIGHTCRAFT_DHAT_FILE, default dhat-heap.json).
+     #[cfg(feature = "dhat-heap")]

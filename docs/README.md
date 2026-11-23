@@ -1,14 +1,6 @@
----
-type: guide
-updated: 2026-10-24
----
+# Documentation
 
-# Contributor guides
-
-- [Development](development.md)
-- [Patches](patching.md)
-- [Cleanup](cleanup.md)
-
-- [Optional features and limitations](features.md)
-
-- [Mainline x86_64 ABIv1 build profile](mainline-v1.md)
+- [Download and installation](../README.md)
+- [Building](development.md)
+- [Patch workflow](patching.md)
+- [Current release](https://github.com/tomaszstaniak/aros-lightcraft/releases/tag/v0.21.1)

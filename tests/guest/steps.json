@@ -1,0 +1,11 @@
+[
+  {"frame": 30, "method": "engine.execute", "params": {"command": "library.state"}},
+  {"frame": 32, "method": "engine.execute", "params": {"command": "develop.set", "params": {"control": "light.exposure", "value": 0.75}}},
+  {"frame": 34, "method": "engine.execute", "params": {"command": "develop.get"}},
+  {"frame": 40, "screenshot": "/RAM/lc/steps-a.png"},
+  {"frame": 42, "method": "engine.execute", "params": {"command": "app.export", "params": {"path": "/RAM/lc/gui-export.jpg", "format": "jpg", "longEdge": 160}}},
+  {"frame": 60, "method": "engine.execute", "params": {"command": "edit.undo"}},
+  {"frame": 62, "method": "engine.execute", "params": {"command": "edit.redo"}},
+  {"frame": 64, "screenshot": "/RAM/lc/steps-b.png"},
+  {"frame": 70, "quit": true}
+]

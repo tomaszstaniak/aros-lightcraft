@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:51:02 +0100
+Subject: [PATCH] AROS: no unlocked-library notice at every start
+
+File::try_lock is not supported on mainline AROS x86_64 (catalog lock warning "try_lock() not supported"), so every library opens without its one-program lock and the window showed the unlocked-library notice at every start (pool v1-4, nightly 20261118). On AROS the notice is left out; the log keeps the warning and the port's release notes say to use a library in one LightCraft at a time.
+---
+ crates/engine/src/library.rs | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/crates/engine/src/library.rs b/crates/engine/src/library.rs
+index 2338d4f1a8f6ba62b132be48d16dd3f5d551654c..4a2a8e0dfc96882794535904370b36cb1951d1b3 100644
+--- a/crates/engine/src/library.rs
++++ b/crates/engine/src/library.rs
+@@ -1013,6 +1013,12 @@ impl Session {
+ /// file system can't lock `catalog.lock` (some network shares). It opens anyway, as documented —
+ /// refusing would lock the user out — but the user must learn that a second program could open it.
+ fn unlocked_warning(lock: Option<&LibraryLock>) -> Option<String> {
++    // AROS: mainline AROS cannot lock files this way at all, so the window would show this at every
++    // start. The port's release notes say to use a library in one LightCraft at a time; the log
++    // still records it (lightcraft_catalog::lock).
++    if cfg!(target_os = "aros") {
++        return None;
++    }
+     lock.filter(|l| !l.held()).map(|_| {
+         "This library could not be locked (its catalog.lock file can't be locked where it is stored, e.g. on some network \
+          shares), so it is open without protection against a second program: use it in one LightCraft app or command at \

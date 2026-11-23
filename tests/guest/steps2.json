@@ -1,0 +1,7 @@
+[
+  {"frame": 20, "method": "engine.execute", "params": {"command": "library.state"}},
+  {"frame": 22, "method": "engine.execute", "params": {"command": "develop.get"}},
+  {"frame": 24, "method": "ui.inspect"},
+  {"frame": 26, "screenshot": "/RAM/lc/steps-c.png"},
+  {"frame": 30, "quit": true}
+]

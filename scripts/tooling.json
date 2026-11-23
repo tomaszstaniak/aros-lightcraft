@@ -1,0 +1,8 @@
+{
+  "comment": "The shared Craft port tools this repository runs through scripts/craft.py: a commit of egui-aros and the content hash of its tools/craft. See that directory's README.",
+  "url": "https://github.com/tomaszstaniak/egui-aros.git",
+  "commit": "f0134f4690c3590d9c70eb38d8773473d79776d4",
+  "path": "tools/craft",
+  "tree_sha256": "ab305641bf49253ee72091b2e80d6ef8c08fc6ab6ab1fda118fce37c77a456f7",
+  "local_key": "egui_aros"
+}

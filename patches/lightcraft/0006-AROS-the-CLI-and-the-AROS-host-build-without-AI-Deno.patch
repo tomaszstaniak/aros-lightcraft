@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:43:07 +0100
+Subject: [PATCH] AROS: the CLI and the AROS host build without AI Denoise
+
+AI Denoise's engine code calls the GPU half in lightcraft-gpu, which has no AROS build (no wgpu backend). The CLI's default feature set is empty in the AROS port, and the AROS host does not turn the engine's denoise feature on; lightcraft-cli denoise-serve says it is not built in.
+---
+ apps/lightcraft-aros/Cargo.toml | 4 ----
+ apps/lightcraft-cli/Cargo.toml  | 4 +++-
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/apps/lightcraft-aros/Cargo.toml b/apps/lightcraft-aros/Cargo.toml
+index eef40f52f17a8f05dd69329ebef6cc75a73c50da..5d989f50518cc949d9cb1ce2509e17d7fecade3d 100644
+--- a/apps/lightcraft-aros/Cargo.toml
++++ b/apps/lightcraft-aros/Cargo.toml
+@@ -19,10 +19,6 @@ todo = "warn"
+ name = "LightCraft"
+ path = "src/main.rs"
+ 
+-[features]
+-default = ["denoise"]
+-denoise = ["lightcraft-engine/denoise"]
+-
+ [dependencies]
+ lightcraft-engine = { workspace = true }
+ lightcraft-ui-egui = { workspace = true }
+diff --git a/apps/lightcraft-cli/Cargo.toml b/apps/lightcraft-cli/Cargo.toml
+index 621668d09489defa9fe41a43a2ff1aa0b9bab705..2dccd3f0bc47de0122e112622b7c5e5f3bc37ae4 100644
+--- a/apps/lightcraft-cli/Cargo.toml
++++ b/apps/lightcraft-cli/Cargo.toml
+@@ -37,7 +37,9 @@ aros-startup = "0.1"
+ lightcraft-testkit = { workspace = true }
+ 
+ [features]
+-default = ["denoise"]
++# The AROS port builds without AI Denoise: its GPU half (lightcraft-gpu) has no AROS build, and
++# the engine's denoise code calls it. Build with `--features denoise` elsewhere.
++default = []
+ denoise = ["lightcraft-engine/denoise"]
+ rawnind-model = ["denoise", "lightcraft-engine/rawnind-model"]
+ # Heap profiling: `cargo run --release -p lightcraft-cli --features dhat-heap -- snapshot …` counts

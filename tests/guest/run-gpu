@@ -1,0 +1,17 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; LightCraft with OpenGL forced (GUI_RENDERER GPU): a library with an imported photo and the test
+; steps of steps.json. Unpack the payload to RAM:lc, then: Execute RAM:lc/run-gpu <results directory>
+FailAt 21
+Protect RAM:lc/LightCraft +e
+SetEnv RUST_LOG info
+SetEnv LIGHTCRAFT_CONFIG_DIR RAM:lc/gdata
+SetEnv LIGHTCRAFT_LOG RAM:lc/gpu-log.txt
+RAM:lc/LightCraft --gui-renderer GPU --library RAM:lc/gpulib --no-demo --window 780x540 --test-steps RAM:lc/steps.json RAM:lc/sample.png
+Echo $RC >[RUNDIR]/gpu.rc
+UnSetEnv LIGHTCRAFT_LOG
+Copy RAM:lc/gpu-log.txt [RUNDIR]/gpu-log.txt
+Copy RAM:lc/steps-a.png [RUNDIR]/gpu-steps-a.png
+Copy RAM:lc/steps-b.png [RUNDIR]/gpu-steps-b.png
+Echo "done" >[RUNDIR]/gpu-done.txt

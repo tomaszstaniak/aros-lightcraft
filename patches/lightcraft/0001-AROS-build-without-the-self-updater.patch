@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:32:39 +0100
+Subject: [PATCH] AROS: build without the self-updater
+
+Releases for AROS come through the AROS package catalogue, and craft-update's HTTPS stack has no AROS build. The updater is left out on target_os = "aros" the way the web build leaves it out; Check for Updates says where AROS updates come from (apkg upgrade lightcraft). The same change as the DeckCraft port's patch 0001.
+---
+ crates/ui-egui/Cargo.toml                |  4 +-
+ crates/ui-egui/src/dialogs/updates_ui.rs | 58 +++++++++++++-----------
+ crates/ui-egui/src/lib.rs                |  2 +-
+ 3 files changed, 36 insertions(+), 28 deletions(-)
+
+diff --git a/crates/ui-egui/Cargo.toml b/crates/ui-egui/Cargo.toml
+index 83a18de44623cbb5d08bc9978a73bf1aabc1e3df..d6f873cecf7393bbc1f1e4a6a490fea658edbf82 100644
+--- a/crates/ui-egui/Cargo.toml
++++ b/crates/ui-egui/Cargo.toml
+@@ -49,5 +49,7 @@ pollster = { workspace = true }
+ serde_json = { workspace = true }
+ toml = "1"
+ 
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++# AROS: no self-update. Releases come through the AROS package catalogue, and the updater's
++# HTTPS stack has no AROS build.
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+ craft-update = { workspace = true }
+diff --git a/crates/ui-egui/src/dialogs/updates_ui.rs b/crates/ui-egui/src/dialogs/updates_ui.rs
+index ee42c37681a463eb2ed15a209500ebd221bb342c..4bb7ad0779eec7928af3ac8bb4178a9772ad57f2 100644
+--- a/crates/ui-egui/src/dialogs/updates_ui.rs
++++ b/crates/ui-egui/src/dialogs/updates_ui.rs
+@@ -4,43 +4,43 @@ use serde_json::Value;
+ 
+ use crate::LightcraftApp;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ use craft_update::dialog::{CheckResultDialog, CheckResultResponse};
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ use craft_update::updater::{Action, Status, Updater};
+ 
+ pub(crate) struct Runtime {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     updater: Updater,
+     /// The desktop app turns the check at start on; tests and the web build leave it off.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     startup_check: bool,
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     check_requested: bool,
+     /// The context of the last frame, to wake the UI when a check is queued from a menu callback.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     repaint: Option<egui::Context>,
+     /// A requested check's result dialog is showing.
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     pub(crate) manual_window_open: bool,
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     pub(crate) status_message: Option<String>,
+ }
+ 
+ impl Default for Runtime {
+     fn default() -> Self {
+         Self {
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             updater: Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")),
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             startup_check: false,
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             check_requested: false,
+-            #[cfg(not(target_arch = "wasm32"))]
++            #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+             repaint: None,
+-            #[cfg(target_arch = "wasm32")]
++            #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+             manual_window_open: false,
+-            #[cfg(target_arch = "wasm32")]
++            #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+             status_message: None,
+         }
+     }
+@@ -48,14 +48,14 @@ impl Default for Runtime {
+ 
+ impl LightcraftApp {
+     /// Whether the app asks for a newer release when it starts (off until the desktop app turns it on).
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     pub fn set_startup_update_check(&mut self, on: bool) {
+         self.updates_rt.startup_check = on;
+     }
+ 
+     /// Starts the helper of a ready update, which installs it once the process has exited. Call it
+     /// in `on_exit` when the process ends there without dropping the app.
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     pub fn start_pending_update(&mut self) {
+         self.updates_rt.updater.start_pending_update();
+     }
+@@ -63,11 +63,11 @@ impl LightcraftApp {
+ 
+ /// The update prompt owns the keyboard while it is open: shortcuts must not reach the library behind it.
+ pub(crate) fn blocks_input(app: &LightcraftApp) -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         app.updates_rt.updater.prompt_open()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         let _ = app;
+         false
+@@ -75,7 +75,7 @@ pub(crate) fn blocks_input(app: &LightcraftApp) -> bool {
+ }
+ 
+ pub(crate) fn check(app: &mut LightcraftApp) -> Result<Value, String> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         app.updates_rt.check_requested = true;
+         if let Some(ctx) = &app.updates_rt.repaint {
+@@ -83,16 +83,22 @@ pub(crate) fn check(app: &mut LightcraftApp) -> Result<Value, String> {
+         }
+         Ok(Value::Null)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         app.updates_rt.manual_window_open = true;
+-        app.updates_rt.status_message = Some("Update check is not supported in the web browser.".into());
++        // AROS: new releases come through the AROS package catalogue (apkg), not the updater.
++        let message = if cfg!(target_os = "aros") {
++            "LightCraft for AROS is updated through the AROS package catalogue: apkg upgrade lightcraft."
++        } else {
++            "Update check is not supported in the web browser."
++        };
++        app.updates_rt.status_message = Some(message.into());
+         Ok(Value::Null)
+     }
+ }
+ 
+ pub(crate) fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         let rt = &mut app.updates_rt;
+         rt.repaint = Some(ctx.clone());
+@@ -103,20 +109,20 @@ pub(crate) fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
+         }
+         rt.updater.tick(ctx);
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     let _ = (app, ctx);
+ }
+ 
+ /// Whether the result dialog shows: for every status but idle (a requested check, and the first
+ /// start after an update, which reports that it installed or why it failed), and never over the
+ /// startup prompt.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn result_window_shows(status: &Status, prompt_open: bool) -> bool {
+     !prompt_open && !matches!(status, Status::Idle)
+ }
+ 
+ pub(crate) fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         // The close for a ready update waits until nothing is unsaved.
+         let clean = app.session.unsaved().is_none();
+@@ -140,7 +146,7 @@ pub(crate) fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
+         }
+     }
+ 
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     if app.updates_rt.manual_window_open {
+         let mut open = true;
+         let shown = egui::Window::new(crate::i18n::tr("LightCraft Updates"))
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index c40d16b8e910efb00c424ed844f29812fc6030d0..5b332f025d9f23e38cff521d2561889472383f0d 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -8,7 +8,7 @@
+ 
+ /// LightCraft as craft-update knows it, with its 128 px icon and accent colour: the update
+ /// prompt shows both, and an AppImage's menu entry gets the icon.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
+     icon_png: Some(include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.lightcraft.png")),
+     accent: Some([0xf2, 0xa5, 0x16]),

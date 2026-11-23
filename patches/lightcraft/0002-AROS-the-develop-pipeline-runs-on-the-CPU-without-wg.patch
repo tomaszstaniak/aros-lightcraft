@@ -1,0 +1,559 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 15:32:39 +0100
+Subject: [PATCH] AROS: the develop pipeline runs on the CPU, without wgpu
+
+wgpu has no AROS backend (no Vulkan, Metal or DX12 driver there). The GPU crate compiles to its CPU fallback on target_os = "aros", as it does for the web build: the cfg gates that leave wgpu out on wasm32 leave it out on AROS too. The CPU pipeline is LightCraft's reference implementation; the GPU setting has no effect on AROS.
+---
+ crates/engine/src/cmd/face_detect.rs    |   7 +-
+ crates/engine/src/cmd/face_recognize.rs |   7 +-
+ crates/engine/src/media/render.rs       |  10 +-
+ crates/gpu/Cargo.toml                   |   2 +-
+ crates/gpu/src/lib.rs                   | 120 ++++++++++++------------
+ crates/gpu/src/vram.rs                  |   8 +-
+ 6 files changed, 81 insertions(+), 73 deletions(-)
+
+diff --git a/crates/engine/src/cmd/face_detect.rs b/crates/engine/src/cmd/face_detect.rs
+index 711bebb102f5297bbc965f479db74de7cf79791a..a788cc34cee7bee8e87572615a37d094dddc85d3 100644
+--- a/crates/engine/src/cmd/face_detect.rs
++++ b/crates/engine/src/cmd/face_detect.rs
+@@ -143,7 +143,12 @@ pub(crate) fn offer_gpu(
+     set_gpu_state(what, GpuState { checking: true, ..GpuState::default() });
+     let spawned = std::thread::Builder::new().name(format!("faces-gpu-{what}")).spawn(move || {
+         let _task = task;
+-        let gpu = match lightcraft_gpu::faces::accelerator() {
++        // AROS: no GPU compute (lightcraft-gpu has no wgpu backend there); the models stay on the CPU.
++        #[cfg(target_os = "aros")]
++        let accelerator: std::result::Result<Arc<dyn lightcraft_faces::net::Accelerator>, String> = Err("there is no GPU compute on AROS".into());
++        #[cfg(not(target_os = "aros"))]
++        let accelerator = lightcraft_gpu::faces::accelerator();
++        let gpu = match accelerator {
+             Ok(gpu) => gpu,
+             Err(why) => {
+                 log::info!("faces: {what} runs on the CPU ({why})");
+diff --git a/crates/engine/src/cmd/face_recognize.rs b/crates/engine/src/cmd/face_recognize.rs
+index 15519fc7575da31f3227e5c0f6453dc1eec3c74e..e5e6007770e2a8abd411680d1f5ba4af49a68209 100644
+--- a/crates/engine/src/cmd/face_recognize.rs
++++ b/crates/engine/src/cmd/face_recognize.rs
+@@ -681,8 +681,11 @@ mod imp {
+             w.allow(target, pace);
+         }
+         // the GPU is held back the same way: a light pace leaves it mostly free for the window's own renders
+-        let (runs, share) = crate::faces_worker::gpu_pace(pace);
+-        lightcraft_gpu::faces::set_pace(runs, share);
++        #[cfg(not(target_os = "aros"))]
++        {
++            let (runs, share) = crate::faces_worker::gpu_pace(pace);
++            lightcraft_gpu::faces::set_pace(runs, share);
++        }
+         while target > 0 && s.faces.in_flight.len() < target + PREFETCH {
+             let Some(id) = s.faces.queue.pop() else { break };
+             let Some(job) = prepare(s, id, true) else { continue };
+diff --git a/crates/engine/src/media/render.rs b/crates/engine/src/media/render.rs
+index bd8ee5292f08b345aa6386687a9f9b6d28b615af..18d0578f303e5379886d1fcdb7d5077977d209f9 100644
+--- a/crates/engine/src/media/render.rs
++++ b/crates/engine/src/media/render.rs
+@@ -61,10 +61,10 @@ pub fn fit_for_display(img: &Rgba8, max_w: usize, max_h: usize) -> Rgba8 {
+ }
+ 
+ /// A render left on the GPU for the window to draw ([`RenderResult::frame`]).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub type ScreenFrame = lightcraft_gpu::DisplayFrame;
+ /// A render left on the GPU for the window to draw (never, in the browser build).
+-#[cfg(target_arch = "wasm32")]
++#[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+ #[derive(Clone, Debug)]
+ pub struct ScreenFrame {
+     pub width: usize,
+@@ -554,7 +554,7 @@ fn develop_image(
+ /// What [`develop_on_screen`] made.
+ enum OnScreen {
+     /// A texture on the window's device, and the histogram (never in the browser build).
+-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++    #[cfg_attr(any(target_arch = "wasm32", target_os = "aros"), allow(dead_code))]
+     Frame(ScreenFrame, Histogram),
+     /// Pixels (GPU or CPU).
+     Pixels(Rendered),
+@@ -563,7 +563,7 @@ enum OnScreen {
+ /// [`develop`] for a render that is only drawn: a texture on the window's device when the GPU
+ /// renderer can hand one over, else the pixels.
+ fn develop_on_screen(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &RenderRequest, stages: Option<&StageCache>) -> OnScreen {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     match lightcraft_gpu::render_display(src, info, s, req, stages) {
+         // an HDR edit's histogram shows the HDR range, as `develop_reporting` gives it
+         Some(lightcraft_gpu::Output::Display { frame, histogram }) => {
+@@ -577,6 +577,6 @@ fn develop_on_screen(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings,
+         }
+         None => OnScreen::Pixels(develop(src, info, s, req, stages, false)),
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     OnScreen::Pixels(develop(src, info, s, req, stages, false))
+ }
+diff --git a/crates/gpu/Cargo.toml b/crates/gpu/Cargo.toml
+index 02edcefd1b4b9150b138132dd73dfa0d2e9c1711..69ef29a89c40dc54e167c9066c117d8513ecea70 100644
+--- a/crates/gpu/Cargo.toml
++++ b/crates/gpu/Cargo.toml
+@@ -20,7 +20,7 @@ log = { workspace = true }
+ 
+ # Native only: Metal / Vulkan / DX12 through wgpu (pure Rust; the drivers are the system's).
+ # The browser build keeps the CPU pipeline (WebGPU needs async device creation: see docs/gpu-pipeline.md).
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++[target.'cfg(not(any(target_arch = "wasm32", target_os = "aros")))'.dependencies]
+ wgpu = { workspace = true }
+ pollster = { workspace = true }
+ bytemuck = { workspace = true }
+diff --git a/crates/gpu/src/lib.rs b/crates/gpu/src/lib.rs
+index 1e06e9f1ad9dfbef85b9de8e30a24d49827d3bc4..48e361f96243885617eec20d26a8133612c9066f 100644
+--- a/crates/gpu/src/lib.rs
++++ b/crates/gpu/src/lib.rs
+@@ -29,29 +29,29 @@ use lightcraft_develop::DevelopSettings;
+ use lightcraft_pipeline::{RenderRequest, Rendered, SourceInfo, StageCache};
+ use lightcraft_raster::Rgb32f;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub mod backend;
+-#[cfg(all(feature = "denoise", not(target_arch = "wasm32")))]
++#[cfg(all(feature = "denoise", not(any(target_arch = "wasm32", target_os = "aros"))))]
+ pub mod bm3d;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ mod ctx;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ mod exit;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub mod faces;
+-#[cfg(all(feature = "denoise", not(target_arch = "wasm32")))]
++#[cfg(all(feature = "denoise", not(any(target_arch = "wasm32", target_os = "aros"))))]
+ pub mod nn;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ mod params;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ mod render;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ mod vram;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub use render::{DisplayFrame, GpuStages, Output};
+ /// The wgpu the renderer is built on (the same crate eframe uses: hosts hand over its device).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub use wgpu;
+ 
+ /// Unit tests that create the device or swap the crash sentinel's path take turns.
+@@ -68,7 +68,7 @@ static BROKEN_REASON: Mutex<Option<String>> = Mutex::new(None);
+ static LAST_FALLBACK: Mutex<Option<String>> = Mutex::new(None);
+ 
+ /// Stop using the GPU for the rest of the process (after a device error).
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(target_arch = "wasm32", target_os = "aros"), allow(dead_code))]
+ fn mark_broken(reason: &str) {
+     let mut r = BROKEN_REASON.lock().unwrap_or_else(|e| e.into_inner());
+     if r.is_none() {
+@@ -77,7 +77,7 @@ fn mark_broken(reason: &str) {
+     BROKEN.store(true, Ordering::Relaxed);
+ }
+ 
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(target_arch = "wasm32", target_os = "aros"), allow(dead_code))]
+ fn record_fallback(reason: String) {
+     *LAST_FALLBACK.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+ }
+@@ -102,14 +102,14 @@ pub fn unavailable_reason() -> Option<String> {
+     if let Some(r) = broken_here() {
+         return Some(format!("stopped after a GPU failure: {r}"));
+     }
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         match GPU.get() {
+             Some(Err(e)) => Some(e.clone()),
+             _ => None,
+         }
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         Some("the browser build has no GPU path yet".into())
+     }
+@@ -173,13 +173,13 @@ pub fn inject_fault(f: Fault) {
+     FAULT.with(|c| c.set(Some(f)));
+ }
+ 
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(target_arch = "wasm32", target_os = "aros"), allow(dead_code))]
+ fn take_fault() -> Option<Fault> {
+     FAULT.with(|c| c.take())
+ }
+ 
+ /// Stop using the GPU on this thread (a simulated fatal failure).
+-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
++#[cfg_attr(any(target_arch = "wasm32", target_os = "aros"), allow(dead_code))]
+ fn mark_broken_here(reason: &str) {
+     let _ = BROKEN_HERE.try_with(|b| {
+         let mut b = b.borrow_mut();
+@@ -219,17 +219,17 @@ pub fn enabled() -> bool {
+ /// `None` (callers render on the CPU), the devices are not created and denoise tiles fail over to
+ /// the CPU. There is no way back. Follow it with [`wait_idle`].
+ pub fn begin_shutdown() {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     exit::begin_shutdown();
+ }
+ 
+ /// Whether [`begin_shutdown`] was called.
+ pub fn shutting_down() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         exit::shutting_down()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         false
+     }
+@@ -239,11 +239,11 @@ pub fn shutting_down() -> bool {
+ /// and after [`begin_shutdown`] none can start, so the process may end; `false`: the deadline
+ /// passed with a render (or a device being created) still inside the driver.
+ pub fn wait_idle(timeout: std::time::Duration) -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         exit::wait_idle(timeout)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         let _ = timeout;
+         true
+@@ -252,7 +252,7 @@ pub fn wait_idle(timeout: std::time::Duration) -> bool {
+ 
+ /// Why GPU compute that has a device of its own (denoise, faces) is switched off by the user's settings, or `None`: the
+ /// environment switches and the rendering preference, but not a render-device failure (the devices are separate).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub(crate) fn switched_off() -> Option<String> {
+     if let Some(why) = env_off_reason() {
+         return Some(why.into());
+@@ -267,7 +267,7 @@ pub fn env_off_reason() -> Option<&'static str> {
+     if !env_disabled() {
+         return None;
+     }
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     if backend::env_off() {
+         return Some("disabled by LIGHTCRAFT_GPU_BACKEND=off");
+     }
+@@ -279,31 +279,31 @@ fn env_disabled() -> bool {
+     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     *OFF.get_or_init(|| {
+         let off = std::env::var("LIGHTCRAFT_GPU").is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false" | "no"));
+-        #[cfg(not(target_arch = "wasm32"))]
++        #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+         let off = off || backend::env_off();
+         off
+     })
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ static GPU: std::sync::OnceLock<Result<ctx::Gpu, String>> = std::sync::OnceLock::new();
+ 
+ /// Set while [`adopt_window_device`] is about to run or running: [`device`] and [`warm_up`] then
+ /// don't create a device of their own (review of PR #1065: the settings' warm-up raced the
+ /// adoption thread and could win, so the window's device went unused).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ static WINDOW_PENDING: AtomicBool = AtomicBool::new(false);
+ 
+ /// Announce (before spawning it) that [`adopt_window_device`] will run, or withdraw that when it
+ /// can't (`false`). Until it has finished, renders take the CPU path and [`warm_up`] does nothing.
+ pub fn set_window_device_pending(pending: bool) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     WINDOW_PENDING.store(pending, Ordering::Release);
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     let _ = pending;
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub(crate) fn device() -> Option<&'static ctx::Gpu> {
+     // turned off (preference, environment): don't even load the driver (issue #136)
+     if env_disabled() || !ENABLED.load(Ordering::Relaxed) {
+@@ -334,7 +334,7 @@ pub(crate) fn device() -> Option<&'static ctx::Gpu> {
+ }
+ 
+ /// The device if it has been created (never creates it).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
+     GPU.get().and_then(|g| g.as_ref().ok())
+ }
+@@ -343,7 +343,7 @@ pub(crate) fn existing_device() -> Option<&'static ctx::Gpu> {
+ /// so the first render doesn't wait ~0.3–0.4 s for it and the UI thread never does. Does nothing
+ /// while GPU rendering is turned off. Repeated calls start one thread at most.
+ pub fn warm_up() {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     if !env_disabled() && ENABLED.load(Ordering::SeqCst) && GPU.get().is_none() && !WINDOW_PENDING.load(Ordering::Acquire) {
+         static STARTED: AtomicBool = AtomicBool::new(false);
+         if STARTED.swap(true, Ordering::SeqCst) {
+@@ -374,11 +374,11 @@ pub fn warm_up() {
+ 
+ /// Has device creation finished (successfully or not)? Never blocks — for status displays.
+ pub fn ready() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         env_disabled() || GPU.get().is_some()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         true
+     }
+@@ -387,11 +387,11 @@ pub fn ready() -> bool {
+ /// Whether a usable GPU adapter exists and GPU rendering is enabled (creates the device on first
+ /// use).
+ pub fn available() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         enabled() && device().is_some()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         false
+     }
+@@ -399,22 +399,22 @@ pub fn available() -> bool {
+ 
+ /// The adapter's name and backend, e.g. "Apple M4 Pro (Metal)".
+ pub fn adapter_name() -> Option<String> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         device().map(|g| format!("{} ({:?})", g.info.name, g.info.backend))
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         None
+     }
+ }
+ 
+ /// Device buffers held by the renderer.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub use ctx::GpuMemory;
+ 
+ /// Device buffers held by the renderer.
+-#[cfg(target_arch = "wasm32")]
++#[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct GpuMemory {
+     pub allocated: u64,
+@@ -424,11 +424,11 @@ pub struct GpuMemory {
+ 
+ /// Device memory held by the renderer's buffers (zero without a device).
+ pub fn memory() -> GpuMemory {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         ctx::memory()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         GpuMemory::default()
+     }
+@@ -436,18 +436,18 @@ pub fn memory() -> GpuMemory {
+ 
+ /// Keep at most `bytes` of recycled buffers in the free pool from now on (trimming it now).
+ pub fn set_pool_limit(bytes: u64) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         ctx::POOL_LIMIT.store(bytes, Ordering::Relaxed);
+         trim_pool(bytes);
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     let _ = bytes;
+ }
+ 
+ /// Free recycled buffers until at most `keep` bytes stay pooled (e.g. when the app goes idle).
+ pub fn trim_pool(keep: u64) {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     if let Some(g) = existing_device()
+         && let Some(_work) = exit::enter()
+     {
+@@ -456,17 +456,17 @@ pub fn trim_pool(keep: u64) {
+         }
+         g.trim(keep);
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     let _ = keep;
+ }
+ 
+ /// Device bytes of the one big source (a zoom window's original) shared by every view of the photo.
+ pub fn shared_source_bytes() -> usize {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         render::shared_source_bytes()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         0
+     }
+@@ -474,11 +474,11 @@ pub fn shared_source_bytes() -> usize {
+ 
+ /// Big sources uploaded to the shared copy so far (a diagnostic: one big photo is uploaded once, not once per window).
+ pub fn source_uploads() -> u64 {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         render::source_uploads()
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         0
+     }
+@@ -486,11 +486,11 @@ pub fn source_uploads() -> u64 {
+ 
+ /// Device bytes held by a view's GPU stages (kept with its [`StageCache`]); 0 when it has none.
+ pub fn stage_bytes(stages: &StageCache) -> usize {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         stages.peek_extension::<GpuStages>().map(|g| g.bytes()).unwrap_or(0)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         let _ = stages;
+         0
+@@ -527,7 +527,7 @@ pub fn try_render(
+     req: &RenderRequest,
+     stages: Option<&StageCache>,
+ ) -> Result<Rendered, Fallback> {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         match run(src, info, s, req, stages, false)? {
+             render::Output::Image(r) => Ok(r),
+@@ -535,7 +535,7 @@ pub fn try_render(
+             render::Output::Display { .. } => Err(Fallback::NotTried),
+         }
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         let _ = (src, info, s, req, stages);
+         Err(Fallback::NotTried)
+@@ -545,18 +545,18 @@ pub fn try_render(
+ /// [`render`] for the window: when the device is the window's ([`adopt_window_device`]) and the
+ /// render allows it, the result stays on the device as a texture to draw ([`Output::Display`]);
+ /// otherwise pixels as from [`render`]. `None`: render on the CPU instead.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub fn render_display(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &RenderRequest, stages: Option<&StageCache>) -> Option<Output> {
+     run(src, info, s, req, stages, true).ok()
+ }
+ 
+ /// Whether renders run on the window's device (and so can be handed over as textures).
+ pub fn on_window_device() -> bool {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+     {
+         existing_device().is_some_and(|g| g.window)
+     }
+-    #[cfg(target_arch = "wasm32")]
++    #[cfg(any(target_arch = "wasm32", target_os = "aros"))]
+     {
+         false
+     }
+@@ -567,7 +567,7 @@ pub fn on_window_device() -> bool {
+ /// call it off the UI thread), in place of [`warm_up`]. When that fails, or the window's device
+ /// doesn't suit (a software adapter, too few storage buffers), a device of its own is created as
+ /// before; `Err` says why the window's wasn't used. Does nothing once a device exists.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub fn adopt_window_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Result<(), String> {
+     /// Whatever the outcome, renders may create or use a device again afterwards.
+     struct Done;
+@@ -616,7 +616,7 @@ pub fn adopt_window_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu:
+ /// `COPY_SRC`): for a headless screenshot of a view drawn straight from the GPU, and for tests. The
+ /// app never needs them to draw. Waits for the GPU (at most a minute); `Err` when the copy or
+ /// the wait fails.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ pub fn read_texture(
+     device: &wgpu::Device,
+     queue: &wgpu::Queue,
+@@ -627,7 +627,7 @@ pub fn read_texture(
+     ctx::read_texture(device, queue, texture, width, height)
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn run(
+     src: &Arc<Rgb32f>,
+     info: &SourceInfo,
+diff --git a/crates/gpu/src/vram.rs b/crates/gpu/src/vram.rs
+index ae79478d227432c90b93682c0f07943190cb7a0a..e75829a511b00f5783d19e9f5c61d1a4d0c65787 100644
+--- a/crates/gpu/src/vram.rs
++++ b/crates/gpu/src/vram.rs
+@@ -156,7 +156,7 @@ impl Cache {
+     }
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn query(adapter: &Adapter) -> Option<u64> {
+     match adapter.vendor {
+         NVIDIA => nvidia(adapter),
+@@ -167,7 +167,7 @@ fn query(adapter: &Adapter) -> Option<u64> {
+ 
+ /// `nvidia-smi --query-gpu=pci.bus_id,pci.device_id,memory.free`: one line per GPU,
+ /// `DDDDDDDD:BB:DD.F, 0xDDDDVVVV, <MiB>`.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn nvidia(adapter: &Adapter) -> Option<u64> {
+     let out = run_with_timeout("nvidia-smi", &["--query-gpu=pci.bus_id,pci.device_id,memory.free", "--format=csv,noheader,nounits"])?;
+     pick(&parse_nvidia(&out), adapter)
+@@ -188,7 +188,7 @@ fn parse_nvidia(out: &str) -> Vec<Card> {
+ 
+ /// `mem_info_vram_total - mem_info_vram_used` of the amdgpu card (its sysfs device directory is named
+ /// by its PCI address).
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn amdgpu(adapter: &Adapter) -> Option<u64> {
+     let read_hex = |p: &std::path::Path| -> Option<u32> {
+         let s = std::fs::read_to_string(p).ok()?;
+@@ -216,7 +216,7 @@ fn amdgpu(adapter: &Adapter) -> Option<u64> {
+ }
+ 
+ /// Run a program and return its standard output, or `None` if it is missing, fails or takes too long.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(not(any(target_arch = "wasm32", target_os = "aros")))]
+ fn run_with_timeout(program: &str, args: &[&str]) -> Option<String> {
+     use std::io::Read;
+     use std::process::{Command, Stdio};

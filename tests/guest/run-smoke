@@ -1,0 +1,63 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; LightCraft smoke run: CLI, GUI starts, a scripted edit in a library, reopened.
+; Unpack the payload to RAM:lc, then: Execute RAM:lc/run-smoke <results directory>
+FailAt 21
+Protect RAM:lc/lightcraft-cli +e
+Protect RAM:lc/LightCraft +e
+SetEnv RUST_LOG info
+SetEnv LIGHTCRAFT_CONFIG_DIR RAM:lc/data
+Echo "start" >[RUNDIR]/start.txt
+RAM:lc/lightcraft-cli --version >[RUNDIR]/cli-version.txt
+Echo $RC >[RUNDIR]/cli-version.rc
+RAM:lc/lightcraft-cli render RAM:lc/sample.png -o RAM:lc/out.jpg --set light.exposure=0.5 --size 160 >[RUNDIR]/cli-render.txt
+Echo $RC >[RUNDIR]/cli-render.rc
+RAM:lc/lightcraft-cli render RAM:lc/out.jpg -o RAM:lc/out2.png >[RUNDIR]/cli-reopen.txt
+Echo $RC >[RUNDIR]/cli-reopen.rc
+RAM:lc/lightcraft-cli render RAM:lc/synthetic.dng -o RAM:lc/raw.png --size 96 >[RUNDIR]/cli-raw.txt
+Echo $RC >[RUNDIR]/cli-raw.rc
+; Export over the file just written: an existing destination must be replaced.
+RAM:lc/lightcraft-cli render RAM:lc/sample.png -o RAM:lc/out.jpg --set light.exposure=-0.5 --size 160 >[RUNDIR]/cli-render2.txt
+Echo $RC >[RUNDIR]/cli-render2.rc
+RAM:lc/lightcraft-cli run --library RAM:lc/clilib --import RAM:lc/sample.png develop.set control=light.exposure value=0.7 app.export path=/RAM/lc/cli-export.jpg longEdge=160 >[RUNDIR]/cli-run.txt
+Echo $RC >[RUNDIR]/cli-run.rc
+RAM:lc/lightcraft-cli run --library RAM:lc/clilib library.state develop.get >[RUNDIR]/cli-run2.txt
+Echo $RC >[RUNDIR]/cli-run2.rc
+RAM:lc/lightcraft-cli mcp <RAM:lc/mcp-in.txt >[RUNDIR]/cli-mcp.txt
+Echo $RC >[RUNDIR]/cli-mcp.rc
+Echo "cli done" >[RUNDIR]/cli-done.txt
+; GUI: version, a start with the demo photos in memory, a library with an edit, reopened.
+RAM:lc/LightCraft --version >[RUNDIR]/gui-version.txt
+Echo $RC >[RUNDIR]/gui-version.rc
+Avail FLUSH >[RUNDIR]/avail0.txt
+SetEnv LIGHTCRAFT_LOG RAM:lc/log-1.txt
+RAM:lc/LightCraft --memory --window 780x540 --screenshot RAM:lc/shot1.png --screenshot-frames 30
+Echo $RC >[RUNDIR]/shot1.rc
+Avail FLUSH >[RUNDIR]/avail1.txt
+SetEnv LIGHTCRAFT_LOG RAM:lc/log-2.txt
+RAM:lc/LightCraft --library RAM:lc/guilib --no-demo --window 780x540 --test-steps RAM:lc/steps.json RAM:lc/sample.png
+Echo $RC >[RUNDIR]/steps.rc
+Avail FLUSH >[RUNDIR]/avail2.txt
+SetEnv LIGHTCRAFT_LOG RAM:lc/log-3.txt
+RAM:lc/LightCraft --window 780x540 --test-steps RAM:lc/steps2.json
+Echo $RC >[RUNDIR]/steps2.rc
+Avail FLUSH >[RUNDIR]/avail3.txt
+RAM:lc/lightcraft-cli run --library RAM:lc/guilib library.state develop.get >[RUNDIR]/cli-guilib.txt
+Echo $RC >[RUNDIR]/cli-guilib.rc
+UnSetEnv LIGHTCRAFT_LOG
+List RAM:lc ALL >[RUNDIR]/list.txt
+Copy RAM:lc/out.jpg [RUNDIR]/out.jpg
+Copy RAM:lc/out2.png [RUNDIR]/out2.png
+Copy RAM:lc/raw.png [RUNDIR]/raw.png
+Copy RAM:lc/cli-export.jpg [RUNDIR]/cli-export.jpg
+Copy RAM:lc/gui-export.jpg [RUNDIR]/gui-export.jpg
+Copy RAM:lc/shot1.png [RUNDIR]/shot1.png
+Copy RAM:lc/steps-a.png [RUNDIR]/steps-a.png
+Copy RAM:lc/steps-b.png [RUNDIR]/steps-b.png
+Copy RAM:lc/steps-c.png [RUNDIR]/steps-c.png
+Copy RAM:lc/log-1.txt [RUNDIR]/log-1.txt
+Copy RAM:lc/log-2.txt [RUNDIR]/log-2.txt
+Copy RAM:lc/log-3.txt [RUNDIR]/log-3.txt
+Copy RAM:lc/data/ui.json [RUNDIR]/ui.json
+Echo "done" >[RUNDIR]/done.txt

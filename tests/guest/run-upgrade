@@ -1,0 +1,41 @@
+.KEY RUNDIR/A,MACHINE/A
+.BRA [
+.KET ]
+; Upgrade check with apkg from local indexes, everything under RAM:. Payload in RAM:ctest: apkg,
+; old.zip + idx-old.json (LightCraft 0.13.0 as published), lc.zip + idx.json (the new package),
+; sample.png, old-edit.jsonl, steps-pkg.json, steps-pkg2.json, run-use. 0.13.0 is installed and
+; edits a photo in its library (LightCraftData/Library), then it is upgraded; the new program opens
+; that library.
+; Execute RAM:ctest/run-upgrade <results directory> <machine name>
+FailAt 21
+Protect RAM:ctest/apkg +e
+MakeDir RAM:pk
+MakeDir RAM:pk/cache
+Copy RAM:ctest/old.zip RAM:pk/cache/lightcraft.zip
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx-old.json install lightcraft --yes >[RUNDIR]/old-install.txt
+Echo $RC >[RUNDIR]/old-install.rc
+Stack 16777216
+; 0.13.0 keeps its library in LightCraftData/Library and its settings in LightCraftData/ui.json.
+; (its option parser wants the library drawer to exist)
+MakeDir RAM:pk/LightCraft/LightCraftData
+MakeDir RAM:pk/LightCraft/LightCraftData/Library
+RAM:pk/LightCraft/LightCraft --library RAM:pk/LightCraft/LightCraftData/Library --script RAM:ctest/old-edit.jsonl --frames 40 RAM:ctest/sample.png >[RUNDIR]/old-gui.txt
+Echo $RC >[RUNDIR]/old-gui.rc
+Copy RAM:pk/LightCraft/LightCraft.log [RUNDIR]/old-gui.log
+Stack 40960
+Echo "user file kept across the upgrade" >RAM:pk/LightCraft/LightCraftData/marker.txt
+List RAM:pk/LightCraft ALL >[RUNDIR]/before-upgrade.txt
+Copy RAM:ctest/lc.zip RAM:pk/cache/lightcraft.new.zip
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json upgrade lightcraft --yes >[RUNDIR]/upgrade.txt
+Echo $RC >[RUNDIR]/upgrade.rc
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json verify lightcraft >[RUNDIR]/verify.txt
+Echo $RC >[RUNDIR]/verify.rc
+List RAM:pk/LightCraft ALL >[RUNDIR]/after-upgrade.txt
+Type RAM:pk/LightCraft/LightCraftData/marker.txt >[RUNDIR]/marker.txt
+Execute RAM:ctest/run-use [RUNDIR]
+RAM:pk/LightCraft/lightcraft-cli run --library RAM:pk/LightCraft/LightCraftData/Library library.state develop.get >[RUNDIR]/after-cli.txt
+Echo $RC >[RUNDIR]/after-cli.rc
+RAM:ctest/apkg --root RAM:pk --machine [MACHINE] --index RAM:ctest/idx.json remove lightcraft --yes >[RUNDIR]/remove.txt
+Echo $RC >[RUNDIR]/remove.rc
+List RAM:pk ALL >[RUNDIR]/after-remove.txt
+Echo "done" >[RUNDIR]/upgrade-done.txt

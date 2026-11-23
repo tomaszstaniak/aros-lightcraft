@@ -1,0 +1,22 @@
+.KEY RUNDIR/A
+.BRA [
+.KET ]
+; Use the installed LightCraft (RAM:pk/LightCraft): the CLI, then the window twice with test steps
+; on the library in its LightCraftData (made at the first start, or kept from an older release).
+FailAt 21
+SetEnv RUST_LOG info
+RAM:pk/LightCraft/lightcraft-cli --version >[RUNDIR]/use-cli-version.txt
+Echo $RC >[RUNDIR]/use-cli-version.rc
+RAM:pk/LightCraft/lightcraft-cli render RAM:ctest/sample.png -o RAM:ctest/use-out.jpg --size 160 >[RUNDIR]/use-cli-render.txt
+Echo $RC >[RUNDIR]/use-cli-render.rc
+SetEnv LIGHTCRAFT_LOG RAM:ctest/use-log-1.txt
+RAM:pk/LightCraft/LightCraft --window 780x540 --test-steps RAM:ctest/steps-pkg.json RAM:ctest/sample.png
+Echo $RC >[RUNDIR]/use-gui-1.rc
+SetEnv LIGHTCRAFT_LOG RAM:ctest/use-log-2.txt
+RAM:pk/LightCraft/LightCraft --window 780x540 --test-steps RAM:ctest/steps-pkg2.json
+Echo $RC >[RUNDIR]/use-gui-2.rc
+UnSetEnv LIGHTCRAFT_LOG
+Copy RAM:ctest/use-log-1.txt [RUNDIR]/use-log-1.txt
+Copy RAM:ctest/use-log-2.txt [RUNDIR]/use-log-2.txt
+Copy RAM:ctest/pkg-a.png [RUNDIR]/pkg-a.png
+Copy RAM:ctest/pkg-b.png [RUNDIR]/pkg-b.png

@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tomaszstaniak <68373859+tomaszstaniak@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 16:16:03 +0100
+Subject: [PATCH] AROS: demo photo renders can be stopped when the program ends
+
+A demo photo is generated procedurally, row by row; at full size that takes minutes in an emulator. AROS's pthread library waits for every thread when the process exits, so LightCraft --memory, closed while the preview workers still generated demo photos, did not end (pool v11-1, run 20261123-160932-194cbeb8: two preview jobs still running after the 10 s shutdown wait, the process stayed after its last log line). lightcraft_scenes::stop_renders makes the renders under way skip their remaining rows and later ones return at once; the demo's generation cache never keeps such pixels (the generation counts as failed). The AROS host calls it before it waits for background work at shutdown. The 0.13.0 port made generations cancellable between rows for the same reason.
+---
+ crates/engine/src/demo.rs  |  2 ++
+ crates/scenes/src/lib.rs   | 16 ++++++++++++++++
+ crates/scenes/src/paint.rs |  4 ++++
+ 3 files changed, 22 insertions(+)
+
+diff --git a/crates/engine/src/demo.rs b/crates/engine/src/demo.rs
+index 4ad755abba3acfc52febd07fd06544e5ee98b2ae..5f00b6a72aec79a348814dcf2dabaabaa6ec5397 100644
+--- a/crates/engine/src/demo.rs
++++ b/crates/engine/src/demo.rs
+@@ -274,6 +274,8 @@ impl SceneSlot {
+         let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generate(render)));
+         let mut g = self.lock();
+         g.generation = match made {
++            // stopped while the program ends: the rows not rendered are black, never keep them
++            Ok(_) if lightcraft_scenes::stopped() => Generation::Failed,
+             Ok(pixels) => Generation::Ready(Arc::new(pixels)),
+             Err(_) => Generation::Failed,
+         };
+diff --git a/crates/scenes/src/lib.rs b/crates/scenes/src/lib.rs
+index 11fd8685d9e84c042b90bebd837e686b33a19a3a..04a7038694118d5a89aaf2c8b20f5322610aa8f6 100644
+--- a/crates/scenes/src/lib.rs
++++ b/crates/scenes/src/lib.rs
+@@ -58,6 +58,22 @@ pub struct Scene {
+     pub meta: SceneMeta,
+ }
+ 
++static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// Stop every scene render, the running ones between rows and the later ones at once: the program
++/// is about to end. A stopped render's pixels are incomplete; [`stopped`] says so, and they must not
++/// be used. The AROS port calls it at shutdown: there the process cannot end while a thread still
++/// renders a demo photo (AROS's pthread library waits for every thread), and a full-size demo photo
++/// takes minutes in an emulator.
++pub fn stop_renders() {
++    STOPPED.store(true, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// [`stop_renders`] was called.
++pub fn stopped() -> bool {
++    STOPPED.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ impl Scene {
+     pub fn aspect(&self) -> f32 {
+         self.width as f32 / self.height as f32
+diff --git a/crates/scenes/src/paint.rs b/crates/scenes/src/paint.rs
+index 32ca0f053bb4b39413d09728864d6d610ee9efa6..50e9e50ea9ac4e37538abbbbc3f531f0ef9ee576 100644
+--- a/crates/scenes/src/paint.rs
++++ b/crates/scenes/src/paint.rs
+@@ -223,6 +223,10 @@ fn render_rows(kind: Kind, seed: u32, w: usize, h: usize, parallel: bool) -> Rgb
+     let ss = if w * h <= 300_000 { 2 } else { 1 };
+     let to2020 = SRGB.to_space(&REC2020).to_f32();
+     let paint = |(y, row): (usize, &mut [[f32; 3]])| {
++        // the program is ending: leave the rest (the caller drops these pixels, see `stopped`)
++        if crate::stopped() {
++            return;
++        }
+         for (xi, px) in row.iter_mut().enumerate() {
+             let mut acc = [0.0f32; 3];
+             for sy in 0..ss {

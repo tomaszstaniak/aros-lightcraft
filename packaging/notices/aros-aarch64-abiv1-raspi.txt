@@ -1,0 +1,35 @@
+Other material built into LightCraft and lightcraft-cli for AROS
+================================================================
+
+Target: AROS on Raspberry Pi, AArch64 ABIv1.
+
+Both programs are statically linked. Nothing below has to be installed
+separately; the programs use only libraries that are part of AROS itself.
+
+AROS link libraries
+  The startup code, library stubs and the POSIX threads library
+  (libpthread) come from the Raspberry Pi SDK of the mainline AROS nightly
+  build of 2026-11-10, unchanged, and are covered by the AROS Public
+  License, version 1.1 (AROS-LICENSE.txt,
+  https://aros.sourceforge.io/license.html).
+
+Rust standard library bridge
+  The C bridge used by the Rust standard library on AArch64 AROS
+  (hosted/rust/aros_*_glue.c of pomaros/pomaros-hosted, commit
+  3bc9359d439f9fb5655cf48924413ffe670931cc), under the AROS Public
+  License, version 1.1, built with one change: room for the SDK's larger
+  thread attribute structure. The change is in the source archive under
+  patches/aros-glue/.
+
+Compiler runtime library
+  compiler-rt builtins 20.1.0 (LLVM), under the Apache License 2.0 with
+  LLVM Exceptions.
+
+Rust standard library
+  The Rust standard library and its dependencies, under the MIT license or
+  the Apache License 2.0 (see THIRD-PARTY.txt and the Rust drawer).
+
+C library bindings and entropy source
+  rust-aros libc-aros (MIT license, Copyright (c) 2026 Tomasz Staniak),
+  which includes jitterentropy-library 3.7.0 (BSD-3-Clause) and an adapter
+  from arospkg (MIT license). Their license texts follow in THIRD-PARTY.txt.
