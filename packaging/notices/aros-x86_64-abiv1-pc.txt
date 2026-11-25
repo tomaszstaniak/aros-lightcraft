@@ -9,7 +9,7 @@ separately; the programs use only libraries that are part of AROS itself.
 AROS link libraries
   The startup code, library stubs and the POSIX threads library
   (libpthread) come from the mainline AROS SDK of the nightly build of
-  2026-11-10, unchanged, and are covered by the AROS Public License,
+  2026-11-24, unchanged, and are covered by the AROS Public License,
   version 1.1 (AROS-LICENSE.txt, https://aros.sourceforge.io/license.html).
 
 GCC runtime library

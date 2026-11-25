@@ -2,6 +2,8 @@
   "name": "LightCraft",
   "version": "0.21.1",
   "release": "0.21.1",
+  "revision": 1,
+  "revision_programs": "rebuilt",
   "upstream_version": "0.21.1 (tag v0.21.1, 361e3bc0)",
   "drawer": "LightCraft",
   "stack": 16777216,
@@ -9,7 +11,7 @@
     "GUI_RENDERER=AUTO"
   ],
   "icon_source": "work:assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png",
-  "source_archive": "LightCraft-0.21.1-source.zip",
+  "source_archive": "LightCraft-0.21.1-r1-source.zip",
   "source_archive_exclude": [
     "AGENTS.md",
     "CLAUDE.md",
@@ -39,8 +41,8 @@
       ]
     },
     "aros-x86_64-abiv1-pc": {
-      "system": "AROS x86_64, mainline ABIv1 (nightly 2026-11-06 or later)",
-      "sdk": "x86_64 mainline ABIv1 SDK of nightly 2026-11-10",
+      "system": "AROS x86_64, mainline ABIv1 (nightly 2026-11-24 or later)",
+      "sdk": "x86_64 mainline ABIv1 SDK of nightly 2026-11-24",
       "notice": "notices/aros-x86_64-abiv1-pc.txt",
       "build": {
         "lto": "fat",
@@ -56,8 +58,8 @@
       ]
     },
     "aros-aarch64-abiv1-raspi": {
-      "system": "AROS on Raspberry Pi, AArch64 ABIv1 (nightly 2026-11-06 or later)",
-      "sdk": "Raspberry Pi AArch64 ABIv1 SDK of nightly 2026-11-10",
+      "system": "AROS on Raspberry Pi, AArch64 ABIv1 (nightly 2026-11-24 or later)",
+      "sdk": "Raspberry Pi AArch64 ABIv1 SDK of nightly 2026-11-24",
       "notice": "notices/aros-aarch64-abiv1-raspi.txt",
       "build": {
         "lto": "fat",
